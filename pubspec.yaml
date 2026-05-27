@@ -12,8 +12,8 @@ dependencies:
   http: ^1.2.0                    # 用于并发下载和在线状态握手
   path_provider: ^2.1.2           # 用于获取安卓本地缓存目录
   shared_preferences: ^2.2.2      # 用于保存文本框中的历史 URL
-  # 关键修改：去除 -LTS 后缀，使用标准社区版，确保 Gradle 能在 Maven 官方源中顺利下载底层原生库
-  ffmpeg_kit_flutter_min_gpl: ^6.0.3  
+  # 换成经典且完全开放、在 Maven 上完美索引的 5.1.0 稳定版，彻底避开 6.0.x 版本的死锁错误
+  ffmpeg_kit_flutter_min_gpl: ^5.1.0  
 
 flutter:
   uses-material-design: true
