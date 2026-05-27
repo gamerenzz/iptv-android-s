@@ -30,10 +30,13 @@ jobs:
           # 1. 在云端创建一个名为 iptv_app 的标准安卓空模板项目
           flutter create --platforms=android --org com.example.iptvtester iptv_app
           
-          # 2. 用我们仓库中自定义的 pubspec.yaml 覆盖模板中的配置
+          # 2. 强行在根目录 android/build.gradle 中注入全局 maven 仓库源，解决 ffmpeg 依赖库无法被拉取的问题
+          echo -e "\nallprojects {\n    repositories {\n        google()\n        mavenCentral()\n    }\n}" >> iptv_app/android/build.gradle
+          
+          # 3. 用我们仓库中自定义的 pubspec.yaml 覆盖模板中的配置
           cp pubspec.yaml iptv_app/pubspec.yaml
           
-          # 3. 用我们仓库中自定义的 main.dart 覆盖模板中的代码
+          # 4. 用我们仓库中自定义的 main.dart 覆盖模板中的代码
           cp lib/main.dart iptv_app/lib/main.dart
 
       - name: 拉取项目所需要的依赖包
