@@ -30,43 +30,9 @@ jobs:
           # 1. 在云端创建一个名为 iptv_app 的标准安卓空模板项目
           flutter create --platforms=android --org com.example.iptvtester iptv_app
           
-          # 2. 强行重写 settings.gradle，注入现代依赖解析器 (PREFER_SETTINGS)，强行打通 Maven Central 渠道
-          cat << 'EOF' > iptv_app/android/settings.gradle
-          pluginManagement {
-              def flutterSdkPath = {
-                  def properties = new Properties()
-                  def file = new File(localPropertiesFile)
-                  if (file.exists()) {
-                      properties.load(file.newDataInputStream())
-                  }
-                  def sdkPath = properties.getProperty("flutter.sdk")
-                  assert sdkPath != null, "flutter.sdk not set in local.properties"
-                  return sdkPath
-              }()
-
-              includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
-
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-
-          plugins {
-              id "dev.flutter.flutter-plugin-loader" version "1.0.0"
-              id "com.android.application" version "7.3.0" apply false
-              id "org.jetbrains.kotlin.android" version "1.7.10" apply false
-          }
-
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          EOF
+          # 2. 仅向原生的 settings.gradle 末尾追加依赖解析器 (PREFER_SETTINGS)
+          # 注意：这里改用 >> 追加模式，完美保留 Flutter 自动生成的原本变量（修复 localPropertiesFile 未定义报错）
+          echo -e "\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)\n    repositories {\n        google()\n        mavenCentral()\n    }\n}" >> iptv_app/android/settings.gradle
           
           # 3. 用我们仓库中自定义的 pubspec.yaml 覆盖模板中的配置
           cp pubspec.yaml iptv_app/pubspec.yaml
