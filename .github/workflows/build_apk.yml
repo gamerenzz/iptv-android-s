@@ -25,14 +25,29 @@ jobs:
         with:
           flutter-version: '3.19.x'
 
+      - name: 在云端自动补全安卓 Gradle 模板并合并代码
+        run: |
+          # 1. 在云端创建一个名为 iptv_app 的标准安卓空模板项目
+          flutter create --platforms=android --org com.example.iptvtester iptv_app
+          
+          # 2. 用我们仓库中自定义的 pubspec.yaml 覆盖模板中的配置
+          cp pubspec.yaml iptv_app/pubspec.yaml
+          
+          # 3. 用我们仓库中自定义的 main.dart 覆盖模板中的代码
+          cp lib/main.dart iptv_app/lib/main.dart
+
       - name: 拉取项目所需要的依赖包
-        run: flutter pub get
+        run: |
+          cd iptv_app
+          flutter pub get
 
       - name: 编译并生成 APK（免签名 Release 版）
-        run: flutter build apk --release
+        run: |
+          cd iptv_app
+          flutter build apk --release
 
       - name: 将编译好的 APK 归档并生成下载文件
         uses: actions/upload-artifact@v4
         with:
           name: iptv-tester-app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: iptv_app/build/app/outputs/flutter-apk/app-release.apk
