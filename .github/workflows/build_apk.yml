@@ -1,0 +1,38 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # 支持在 GitHub 网页上人工点击“开始编译”
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Java 运行环境 (Java 17)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: 设置 Flutter 编译环境
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.x'
+
+      - name: 拉取项目所需要的依赖包
+        run: flutter pub get
+
+      - name: 编译并生成 APK（免签名 Release 版）
+        run: flutter build apk --release
+
+      - name: 将编译好的 APK 归档并生成下载文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: iptv-tester-app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
