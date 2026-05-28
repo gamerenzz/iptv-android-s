@@ -408,7 +408,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
         Channel ch = targets[currentIndex];
         try {
           // 绝对保障：给网络握手+FFmpeg画质解析总工程套上 8 秒绝对硬超时！
-          // 无论底层网络僵死、代理崩溃、还是 C++ 解码器发生逻辑死锁，到点直接强制掐断！
+          // 无论是由于网络连接僵死、代理崩溃、还是 C++ 解码器发生逻辑死锁，到点直接强制掐断！
           await _testSingleChannel(ch).timeout(const Duration(seconds: 8));
         } catch (_) {
           ch.status = "探测超时";
@@ -538,6 +538,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
     List<FileSystemEntity> files = dir.listSync();
     
+    // 采用标准健全的 Dart 字符串校验
     List<String> cachedFiles = files
         .map((e) => e.path.split('/').last)
         .where((f) {
@@ -597,6 +598,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
           
+          // 第一排主按钮：增加本地载入和清理缓存
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
@@ -616,6 +618,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ],
           ),
           
+          // 第二排辅助按钮：将缓存载入和清空整合在此，解决布局拥挤导致不见的问题
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             child: Row(
@@ -779,7 +782,30 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   }
 }
 
-// 兼容低版本
-extension on String {
-  bool lower() => this.toLowerCase() != "";
+// --- 修复 1：强行在此处完整补上遗漏的信号量锁类声明，确保顺利编译 ---
+class SimpleSemaphore {
+  final int maxConcurrent;
+  int _running = 0;
+  final List<Completer<void>> _queue = [];
+
+  SimpleSemaphore(this.maxConcurrent);
+
+  Future<void> acquire() async {
+    if (_running < maxConcurrent) {
+      _running++;
+      return;
+    }
+    final completer = Completer<void>();
+    _queue.add(completer);
+    return completer.future;
+  }
+
+  void release() {
+    if (_queue.isNotEmpty) {
+      final next = _queue.removeAt(0);
+      next.complete();
+    } else {
+      _running--;
+    }
+  }
 }
