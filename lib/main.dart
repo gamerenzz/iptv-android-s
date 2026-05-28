@@ -88,8 +88,11 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   void _addLog(String msg) {
     setState(() {
-      String time = DateTime.now().toLocal().toString().substring(11, 19);
+      String time =
+          DateTime.now().toLocal().toString().substring(11, 19);
+
       _logs.insert(0, "[$time] $msg");
+
       if (_logs.length > 80) {
         _logs.removeLast();
       }
@@ -109,7 +112,10 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   Future<void> _saveUrls() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString("saved_urls", _urlController.text);
+    await prefs.setString(
+      "saved_urls",
+      _urlController.text,
+    );
   }
 
   Future<void> _startBatchDownload() async {
@@ -139,7 +145,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       return;
     }
 
-    _addLog("开始并行下载 ${urls.length} 个地址...");
     int success = 0;
     final directory = await getTemporaryDirectory();
     List<Future> tasks = [];
@@ -158,7 +163,8 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _visibleChannels = List.from(_allChannels);
       _applySort();
       _isDownloading = false;
-      _statusText = "下载完成 成功 $success/${urls.length} 共 ${_allChannels.length} 个频道";
+      _statusText =
+          "下载完成 成功 $success/${urls.length} 共 ${_allChannels.length} 个频道";
     });
   }
 
@@ -173,7 +179,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       ).timeout(const Duration(seconds: 15));
 
       if (response.statusCode != 200) {
-        _addLog("下载失败 [${response.statusCode}]: $url");
         return false;
       }
 
@@ -181,10 +186,8 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       final file = File("$dir/$fileName");
       await file.writeAsBytes(response.bodyBytes);
       _parseFile(response.body, fileName);
-      _addLog("下载成功: $fileName");
       return true;
-    } catch (e) {
-      _addLog("下载异常: ${e.toString().split(':').last}");
+    } catch (_) {
       return false;
     }
   }
@@ -227,7 +230,10 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   void _onFilterChanged() {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 300), _applyFilter);
+    _debounce = Timer(
+      const Duration(milliseconds: 300),
+      _applyFilter,
+    );
   }
 
   void _applyFilter() {
@@ -247,7 +253,9 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             delayMatch = false;
           } else {
             int? d = int.tryParse(ch.delay);
-            if (d == null || d > maxDelay) delayMatch = false;
+            if (d == null || d > maxDelay) {
+              delayMatch = false;
+            }
           }
         }
         return textMatch && delayMatch;
@@ -322,7 +330,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _allChannels.removeWhere((ch) => ch.isSelected);
       _applyFilter();
     });
-    _addLog("已删除选中频道");
   }
 
   Future<void> _startTest() async {
@@ -417,6 +424,13 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     );
   }
 
+  // --- 补全核心缺失：_clearFilterText 方法 ---
+  void _clearFilterText() {
+    _filterController.clear();
+    _delayController.clear();
+    _applyFilter();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -446,7 +460,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ],
           ),
           
-          // --- 补全 1：关键词、延迟过滤栏 ---
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
             child: Row(
@@ -476,7 +489,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
 
-          // --- 补全 2：全选、反选、删除、排序栏 ---
           Container(
             color: Colors.grey[200],
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
