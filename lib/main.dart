@@ -119,7 +119,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     await prefs.setString("saved_urls", _urlController.text);
   }
 
-  // --- 批量强制重下载逻辑（引入原始绝对行号追踪） ---
+  // --- 批量强制重下载逻辑 ---
   Future<void> _startBatchDownload() async {
     if (_isDownloading) return;
     await _saveUrls();
@@ -351,7 +351,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       List<FileSystemEntity> files = dir.listSync();
       int deletedCount = 0;
       for (var file in files) {
-        // 安全检测：只删除 M3U 和 TXT 格式的缓存数据
         if (file is File && (file.path.endsWith('.m3u') || file.path.endsWith('.txt'))) {
           await file.delete();
           deletedCount++;
@@ -523,7 +522,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
     List<FileSystemEntity> files = dir.listSync();
     
-    // 修复 2：彻底弃用容易引发冲突的 String 扩展，直接采用标准健全的 Dart 字符串校验
     List<String> cachedFiles = files
         .map((e) => e.path.split('/').last)
         .where((f) {
@@ -582,14 +580,47 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
               decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "每行一个M3U/TXT地址"),
             ),
           ),
+          
+          // 第一排主按钮：增加本地载入和清理缓存，排版更具结构性
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
-              ElevatedButton(onPressed: _startBatchDownload, child: const Text("下载导入")),
-              ElevatedButton(onPressed: _startTest, style: ElevatedButton.styleFrom(backgroundColor: Colors.green[50]), child: const Text("测速勾选项", style: TextStyle(color: Colors.green))),
-              ElevatedButton(onPressed: () => setState(() => _isTesting = false), child: const Text("停止")),
+              ElevatedButton(
+                onPressed: _startBatchDownload,
+                child: const Text("下载导入"),
+              ),
+              ElevatedButton(
+                onPressed: _startTest,
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.green[50]),
+                child: const Text("测速勾选项", style: TextStyle(color: Colors.green)),
+              ),
+              ElevatedButton(
+                onPressed: () => setState(() => _isTesting = false),
+                child: const Text("停止"),
+              ),
             ],
           ),
+          
+          // 第二排辅助按钮：将缓存载入和清空整合在此，解决布局拥挤导致不见的问题
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: load_local_cache,
+                  icon: const Icon(Icons.folder_open, size: 16),
+                  label: const Text("载入本地缓存", style: TextStyle(fontSize: 12)),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _clearCache,
+                  icon: const Icon(Icons.delete_sweep, size: 16, color: Colors.orange),
+                  label: const Text("清理全部缓存", style: TextStyle(fontSize: 12, color: Colors.orange)),
+                ),
+              ],
+            ),
+          ),
+          
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
             child: Row(
@@ -624,9 +655,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                 TextButton(onPressed: () => _selectAll(true), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("全选", style: TextStyle(fontSize: 12))),
                 TextButton(onPressed: () => _selectAll(false), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("反选", style: TextStyle(fontSize: 12))),
                 TextButton(onPressed: _deleteSelected, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("删除", style: TextStyle(fontSize: 12, color: Colors.red))),
-                
-                // 清理按钮，位于“删除”右侧
-                TextButton(onPressed: _clearCache, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("清理", style: TextStyle(fontSize: 12, color: Colors.orange))),
                 
                 const Spacer(),
                 
@@ -737,7 +765,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   }
 }
 
-// --- 修复 1：在文件最底部重新完整补上缺失的信号量类定义，确保编译通过 ---
+// --- 信号量类（防止原生并发崩溃） ---
 class SimpleSemaphore {
   final int maxConcurrent;
   int _running = 0;
