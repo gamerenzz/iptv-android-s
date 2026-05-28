@@ -13,8 +13,8 @@ dependencies:
   http: ^1.2.0
   path_provider: ^2.1.2
   shared_preferences: ^2.2.2
-  # 使用官方标准的、含网络解码支持的 FFmpeg 核心
-  ffmpeg_kit_flutter: ^6.0.3
+  # 核心调整：使用与您找到的 AAR 文件完全一致的 GPL 长期支持版
+  ffmpeg_kit_flutter_full_gpl: ^6.0.3-LTS
 
 flutter:
   uses-material-design: true
