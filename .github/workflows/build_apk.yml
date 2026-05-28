@@ -4,45 +4,58 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # 支持人工点击编译
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 检出仓库代码
+      - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 设置 Java 运行环境 (Java 17)
+      - name: 安装 Java17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: '17'
+          distribution: zulu
+          java-version: 17
 
-      - name: 设置 Flutter 编译环境 (使用极其兼容的经典版 3.13.0)
+      - name: 安装 Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.13.0'
+          flutter-version: 3.16.9
 
-      - name: 构建安卓环境并实施底层构建脚本的暴力替换
+      - name: 创建 Flutter 安卓工程
         run: |
-          # 1. 创建经典版安卓模板
-          flutter create --platforms=android --org com.example.iptvtester iptv_app
-          
-          # 2. 强行拉高安卓应用的最低运行版本到 API 24 (Android 7.0)，适配 FFmpeg
+          flutter create --platforms=android iptv_app
+
+      - name: 替换项目文件
+        run: |
+          cp pubspec.yaml iptv_app/pubspec.yaml
+          mkdir -p iptv_app/lib
+          cp lib/main.dart iptv_app/lib/main.dart
+
+      - name: 修复 Android 配置
+        run: |
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' iptv_app/android/app/build.gradle
-          
-          # 3. 终极杀招：完全覆盖根目录 build.gradle，强行将 mavenCentral() 注入全局所有模块！
-          cat << 'EOF' > iptv_app/android/build.gradle
+
+          sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 34/g' iptv_app/android/app/build.gradle
+
+          sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 34/g' iptv_app/android/app/build.gradle
+
+      - name: 升级 Gradle 配置
+        run: |
+          cat > iptv_app/android/build.gradle << 'EOF'
           buildscript {
-              ext.kotlin_version = '1.8.22'
+              ext.kotlin_version = '1.9.10'
+
               repositories {
                   google()
                   mavenCentral()
               }
+
               dependencies {
-                  classpath 'com.android.tools.build:gradle:7.3.0'
+                  classpath 'com.android.tools.build:gradle:8.1.0'
                   classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
               }
           }
@@ -55,32 +68,28 @@ jobs:
           }
 
           rootProject.buildDir = '../build'
+
           subprojects {
               project.buildDir = "${rootProject.buildDir}/${project.name}"
-              project.evaluationDependsOn(':app')
           }
 
-          task clean(type: Delete) {
+          tasks.register("clean", Delete) {
               delete rootProject.buildDir
           }
           EOF
-          
-          # 4. 覆盖我们的代码和依赖文件
-          cp pubspec.yaml iptv_app/pubspec.yaml
-          cp lib/main.dart iptv_app/lib/main.dart
 
-      - name: 拉取项目所需要的依赖包
+      - name: 安装依赖
         run: |
           cd iptv_app
           flutter pub get
 
-      - name: 编译并生成 APK（免签名 Release 版）
+      - name: 编译 APK
         run: |
           cd iptv_app
           flutter build apk --release
 
-      - name: 将编译好的 APK 归档并生成下载文件
+      - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
-          name: iptv-tester-app-release
+          name: iptv-release
           path: iptv_app/build/app/outputs/flutter-apk/app-release.apk
