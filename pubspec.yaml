@@ -1,6 +1,7 @@
 name: iptv_tester
 description: A multi-threaded IPTV Speed Tester and Resolution Detector for Android.
 publish_to: 'none'
+
 version: 1.0.0+1
 
 environment:
@@ -9,11 +10,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
   http: ^1.2.0
   path_provider: ^2.1.2
   shared_preferences: ^2.2.2
-  # 引入官方视频播放插件，用于静默嗅探 .ts 及单层流的真实画质
-  video_player: ^2.8.2  
 
 flutter:
   uses-material-design: true
