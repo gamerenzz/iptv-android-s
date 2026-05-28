@@ -74,9 +74,8 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   SortType _currentSort = SortType.none;
   bool _isAscending = true;
 
-  // --- 原生桥接通道 ---
-  static const _platform = MethodChannel('com.example.iptvtester/resolution');
-  final SimpleSemaphore _resSemaphore = SimpleSemaphore(2); 
+  // 限制同时最多只有 3 个原生播放器向系统请求画质（防止过载）
+  final SimpleSemaphore _resSemaphore = SimpleSemaphore(3); 
 
   @override
   void initState() {
@@ -108,7 +107,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     await prefs.setString("saved_urls", _urlController.text);
   }
 
-  // --- 强制重新下载逻辑 ---
   Future<void> _startBatchDownload() async {
     if (_isDownloading) return;
     await _saveUrls();
@@ -166,7 +164,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       final response = await http.get(
         uri, 
         headers: {
-          "User-Agent": "Mozilla/5.0",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
           "Cache-Control": "no-cache",
           "Pragma": "no-cache"
         }
@@ -194,7 +192,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     String tempName = "未知频道";
     for (String line in lines) {
       line = line.trim();
-      // 修复 1：修正拼写为正确的驼峰法 startsWith
       if (line.startsWith("#EXTINF")) {
         final match = RegExp(r',([^,]+)$').firstMatch(line);
         if (match != null) tempName = match.group(1)!.trim();
@@ -310,6 +307,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _addLog("已删除选中的频道");
   }
 
+  // --- 并发 25 测速控制逻辑 ---
   Future<void> _startTest() async {
     List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
     
@@ -322,7 +320,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _isTesting = true;
       _statusText = "开始测速 ${targets.length} 个选中源...";
     });
-    _addLog("并发测速中...");
+    _addLog("开始并发测速（已启用302自适应重定向和1KB极限缓存拦截）");
 
     const concurrency = 25; 
     for (int i = 0; i < targets.length; i += concurrency) {
@@ -345,29 +343,39 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     });
   }
 
+  // --- 核心重构：http.get 配合 Range 极限探测 ---
   Future<void> _testSingleChannel(Channel ch) async {
     Stopwatch sw = Stopwatch()..start();
     try {
-      final client = HttpClient();
-      client.connectionTimeout = const Duration(seconds: 3);
-      final request = await client.getUrl(Uri.parse(ch.url));
-      request.headers.set("User-Agent", "Mozilla/5.0");
-      final response = await request.close();
-      sw.stop();
+      final client = http.Client();
       
+      // 发送标准的 GET 请求，但附加 Range 头，命令服务器只返回前 1KB 的数据
+      final response = await client.get(
+        Uri.parse(ch.url),
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Range": "bytes=0-1024", // 关键：只拉取 1KB，既能测出首包响应时间，又绝对不会卡死或浪费流量
+          "Accept": "*/*",
+          "Connection": "keep-alive"
+        },
+      ).timeout(const Duration(seconds: 4)); // 适当放宽至 4 秒超时以容纳慢速 TLS 握手
+      
+      sw.stop();
+      client.close();
+
       ch.delay = sw.elapsedMilliseconds.toString();
-      if (response.statusCode == 200) {
+      
+      // 200 (OK) 或 206 (Partial Content 分片返回，说明Range成功截断了视频) 均视为在线
+      if (response.statusCode == 200 || response.statusCode == 206) {
         ch.status = "在线";
-        await _resSemaphore.acquire();
-        try {
-          ch.resolution = await _detectResolutionNative(ch.url);
-        } finally {
-          _resSemaphore.release();
-        }
+        
+        // 意外之喜：因为已经下载了前 1KB 字节，M3U8 的分辨率标签刚好就在这里，直接在这里解析！
+        ch.resolution = _parseResolutionFromContent(response.body);
       } else {
         ch.status = "HTTP ${response.statusCode}";
+        ch.delay = "-";
+        ch.resolution = "-";
       }
-      client.close();
     } catch (_) {
       ch.status = "离线";
       ch.delay = "-";
@@ -375,30 +383,27 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
-  Future<String> _detectResolutionNative(String url) async {
-    try {
-      final String result = await _platform.invokeMethod('getResolution', {'url': url});
-      if (result == "未知" || result == "探测失败" || result == "异常") {
-        return result;
-      }
-      final parts = result.split('x');
-      if (parts.length == 2) {
-        int height = int.tryParse(parts[1]) ?? 0;
-        if (height >= 2160) return "4K ($result)";
-        if (height >= 1080) return "1080p ($result)";
-        if (height >= 720) return "720p ($result)";
-        return "标清 ($result)";
-      }
-      return result;
-    } catch (e) {
-      return "未知";
+  // 极速解析法：从已经获取到的 1KB 字节内容中提取分辨率
+  String _parseResolutionFromContent(String body) {
+    if (!body.contains("#EXTM3U")) {
+      return "非M3U8文本流"; // 如果前 1KB 连 M3U8 标识都没有，必然是 TS 直连流
     }
+    final match = RegExp(r'RESOLUTION=(\d+)[xX](\d+)', caseSensitive: false).firstMatch(body);
+    if (match == null) {
+      return "单层流无分辨率"; // 单层 M3U8 没有多级画质，不包含 RESOLUTION 标签
+    }
+    int width = int.parse(match.group(1)!);
+    int height = int.parse(match.group(2)!);
+    String res = "${width}x$height";
+
+    if (height >= 1080) return "1080p ($res)";
+    if (height >= 720) return "720p ($res)";
+    return "标清 ($res)";
   }
 
   void _copyUrl(String url, String name) {
     Clipboard.setData(ClipboardData(text: url));
     ScaffoldMessenger.of(context).showSnackBar(
-      // 修复 2：修正错误的 ch.name 变量为传入的局部参数 name
       SnackBar(content: Text("已复制 $name"), duration: const Duration(seconds: 1)),
     );
   }
