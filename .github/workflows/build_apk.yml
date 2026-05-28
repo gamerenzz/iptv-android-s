@@ -17,17 +17,17 @@ jobs:
           distribution: zulu
           java-version: 17
 
-      - name: Setup Flutter
+      - name: Setup Flutter (回归 3.19.x 以原生契合 video_player 插件要求)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.16.9
+          flutter-version: 3.19.x
 
       - name: Create Project
         run: flutter create --platforms=android iptv_app
 
       - name: Inject Internet Permission & Copy Files
         run: |
-          # 核心修复：强制向生成的安卓清单文件中注入 INTERNET 网络权限
+          # 核心：强制注入网络权限以确保 Release 状态下手机能够正常联网
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/g' iptv_app/android/app/src/main/AndroidManifest.xml
           
           cp pubspec.yaml iptv_app/pubspec.yaml
