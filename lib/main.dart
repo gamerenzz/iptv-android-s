@@ -79,6 +79,11 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   SortType _currentSort = SortType.none;
   bool _isAscending = true;
 
+  // --- 安卓原生 MethodChannel 通道 ---
+  static const _platform = MethodChannel('com.example.iptvtester/resolution');
+  // 限制同时最大只有 2 个原生播放器在后台进行画质解析，防止手机发热卡死
+  final SimpleSemaphore _resSemaphore = SimpleSemaphore(2); 
+
   @override
   void initState() {
     super.initState();
@@ -368,7 +373,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
       final request = await client.getUrl(Uri.parse(ch.url));
       request.headers.set("User-Agent", "Mozilla/5.0");
-      request.headers.set("Range", "bytes=0-1023");
+      request.headers.set("Range", "bytes=0-1023"); // 1KB 极速握手
 
       final response = await request.close();
       List<int> bytes = [];
@@ -383,11 +388,14 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
       if (response.statusCode == 200 || response.statusCode == 206) {
         ch.status = "在线";
-        String body = "";
+        
+        // --- 核心修改：在线后，通过信号量锁保护，调用系统底层播放引擎探测真实分辨率 ---
+        await _resSemaphore.acquire();
         try {
-          body = utf8.decode(bytes);
-        } catch (_) {}
-        ch.resolution = _parseResolutionFromContent(body);
+          ch.resolution = await _detectResolutionNative(ch.url);
+        } finally {
+          _resSemaphore.release();
+        }
       } else {
         ch.status = "HTTP ${response.statusCode}";
         ch.delay = "-";
@@ -402,19 +410,25 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
-  String _parseResolutionFromContent(String body) {
-    if (!body.contains("#EXTM3U")) return "未知";
-    final match = RegExp(r'RESOLUTION=(\d+)[xX](\d+)', caseSensitive: false).firstMatch(body);
-    if (match == null) return "单层流";
-
-    int width = int.parse(match.group(1)!);
-    int height = int.parse(match.group(2)!);
-    String res = "${width}x$height";
-
-    if (height >= 2160) return "4K ($res)";
-    if (height >= 1080) return "1080p ($res)";
-    if (height >= 720) return "720p ($res)";
-    return "标清 ($res)";
+  // 调用安卓原生 MethodChannel 系统播放器引擎获取物理长宽
+  Future<String> _detectResolutionNative(String url) async {
+    try {
+      final String result = await _platform.invokeMethod('getResolution', {'url': url});
+      if (result == "未知" || result == "探测失败" || result == "异常") {
+        return result;
+      }
+      final parts = result.split('x');
+      if (parts.length == 2) {
+        int height = int.tryParse(parts[1]) ?? 0;
+        if (height >= 2160) return "4K ($result)";
+        if (height >= 1080) return "1080p ($result)";
+        if (height >= 720) return "720p ($result)";
+        return "标清 ($result)";
+      }
+      return result;
+    } catch (_) {
+      return "未知";
+    }
   }
 
   void _copyUrl(String url, String name) {
@@ -424,7 +438,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     );
   }
 
-  // --- 补全核心缺失：_clearFilterText 方法 ---
   void _clearFilterText() {
     _filterController.clear();
     _delayController.clear();
@@ -554,5 +567,33 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
         ],
       ),
     );
+  }
+}
+
+// --- 信号量类定义 ---
+class SimpleSemaphore {
+  final int maxConcurrent;
+  int _running = 0;
+  final List<Completer<void>> _queue = [];
+
+  SimpleSemaphore(this.maxConcurrent);
+
+  Future<void> acquire() async {
+    if (_running < maxConcurrent) {
+      _running++;
+      return;
+    }
+    final completer = Completer<void>();
+    _queue.add(completer);
+    return completer.future;
+  }
+
+  void release() {
+    if (_queue.isNotEmpty) {
+      final next = _queue.removeAt(0);
+      next.complete();
+    } else {
+      _running--;
+    }
   }
 }
