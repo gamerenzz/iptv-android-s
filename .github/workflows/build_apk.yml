@@ -1,9 +1,6 @@
 name: Build Android APK
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
@@ -11,85 +8,41 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 检出仓库
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装 Java17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: zulu
           java-version: 17
 
-      - name: 安装 Flutter
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.16.9
 
-      - name: 创建 Flutter 安卓工程
-        run: |
-          flutter create --platforms=android iptv_app
+      - name: Create Project
+        run: flutter create --platforms=android iptv_app
 
-      - name: 替换项目文件
+      - name: Copy Files
         run: |
           cp pubspec.yaml iptv_app/pubspec.yaml
           mkdir -p iptv_app/lib
           cp lib/main.dart iptv_app/lib/main.dart
 
-      - name: 修复 Android 配置
-        run: |
-          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' iptv_app/android/app/build.gradle
-
-          sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 34/g' iptv_app/android/app/build.gradle
-
-          sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 34/g' iptv_app/android/app/build.gradle
-
-      - name: 升级 Gradle 配置
-        run: |
-          cat > iptv_app/android/build.gradle << 'EOF'
-          buildscript {
-              ext.kotlin_version = '1.9.10'
-
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-
-              dependencies {
-                  classpath 'com.android.tools.build:gradle:8.1.0'
-                  classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
-              }
-          }
-
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-
-          rootProject.buildDir = '../build'
-
-          subprojects {
-              project.buildDir = "${rootProject.buildDir}/${project.name}"
-          }
-
-          tasks.register("clean", Delete) {
-              delete rootProject.buildDir
-          }
-          EOF
-
-      - name: 安装依赖
+      - name: Flutter Pub Get
         run: |
           cd iptv_app
           flutter pub get
 
-      - name: 编译 APK
+      - name: Build APK
         run: |
           cd iptv_app
           flutter build apk --release
 
-      - name: 上传 APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: iptv-release
+          name: iptv-apk
           path: iptv_app/build/app/outputs/flutter-apk/app-release.apk
