@@ -7,34 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:io';
 import 'dart:async';
 
-// --- 轻量级信号量控制锁，用于限制原生播放器画质解析的并发数 ---
-class SimpleSemaphore {
-  final int maxConcurrent;
-  int _running = 0;
-  final List<Completer<void>> _queue = [];
-
-  SimpleSemaphore(this.maxConcurrent);
-
-  Future<void> acquire() async {
-    if (_running < maxConcurrent) {
-      _running++;
-      return;
-    }
-    final completer = Completer<void>();
-    _queue.add(completer);
-    return completer.future;
-  }
-
-  void release() {
-    if (_queue.isNotEmpty) {
-      final next = _queue.removeAt(0);
-      next.complete();
-    } else {
-      _running--;
-    }
-  }
-}
-
+// --- 全局忽略 SSL 证书错误 ---
 class MyHttpOverrides extends HttpOverrides {
   @override
   HttpClient createHttpClient(SecurityContext? context) {
@@ -103,7 +76,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   // --- 原生桥接通道 ---
   static const _platform = MethodChannel('com.example.iptvtester/resolution');
-  // 限制同时只有 2 个原生播放器进行分辨率探测，防止手机卡死
   final SimpleSemaphore _resSemaphore = SimpleSemaphore(2); 
 
   @override
@@ -136,13 +108,14 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     await prefs.setString("saved_urls", _urlController.text);
   }
 
+  // --- 强制重新下载逻辑 ---
   Future<void> _startBatchDownload() async {
     if (_isDownloading) return;
     await _saveUrls();
 
     setState(() {
       _isDownloading = true;
-      _statusText = "开始下载...";
+      _statusText = "开始强制下载...";
       _allChannels.clear();
       _visibleChannels.clear();
       _logs.clear();
@@ -164,7 +137,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       return;
     }
 
-    _addLog("准备下载 ${urls.length} 个链接");
+    _addLog("准备并发强制下载 ${urls.length} 个链接");
     int success = 0;
     final directory = await getTemporaryDirectory();
     List<Future> tasks = [];
@@ -221,7 +194,8 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     String tempName = "未知频道";
     for (String line in lines) {
       line = line.trim();
-      if (line.startswith("#EXTINF")) {
+      // 修复 1：修正拼写为正确的驼峰法 startsWith
+      if (line.startsWith("#EXTINF")) {
         final match = RegExp(r',([^,]+)$').firstMatch(line);
         if (match != null) tempName = match.group(1)!.trim();
       } else if (line.isNotEmpty && !line.startsWith("#")) {
@@ -336,7 +310,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _addLog("已删除选中的频道");
   }
 
-  // --- 并发 10~30 测速控制逻辑 ---
   Future<void> _startTest() async {
     List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
     
@@ -351,7 +324,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     });
     _addLog("并发测速中...");
 
-    // 并发测速设置为 25 (满足 10~30 并发测速要求)
     const concurrency = 25; 
     for (int i = 0; i < targets.length; i += concurrency) {
       if (!_isTesting) {
@@ -386,8 +358,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       ch.delay = sw.elapsedMilliseconds.toString();
       if (response.statusCode == 200) {
         ch.status = "在线";
-        
-        // --- 核心限制：必须获取信号量锁，保证后台同时最多只有 2 个播放器正在向安卓索要分辨率 ---
         await _resSemaphore.acquire();
         try {
           ch.resolution = await _detectResolutionNative(ch.url);
@@ -405,7 +375,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
-  // 调用安卓原生 MediaPlayer 通道解析分辨率
   Future<String> _detectResolutionNative(String url) async {
     try {
       final String result = await _platform.invokeMethod('getResolution', {'url': url});
@@ -429,7 +398,8 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   void _copyUrl(String url, String name) {
     Clipboard.setData(ClipboardData(text: url));
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("已复制 ${ch.name}"), duration: const Duration(seconds: 1)),
+      // 修复 2：修正错误的 ch.name 变量为传入的局部参数 name
+      SnackBar(content: Text("已复制 $name"), duration: const Duration(seconds: 1)),
     );
   }
 
@@ -599,5 +569,33 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
         ],
       ),
     );
+  }
+}
+
+// --- 信号量类定义 ---
+class SimpleSemaphore {
+  final int maxConcurrent;
+  int _running = 0;
+  final List<Completer<void>> _queue = [];
+
+  SimpleSemaphore(this.maxConcurrent);
+
+  Future<void> acquire() async {
+    if (_running < maxConcurrent) {
+      _running++;
+      return;
+    }
+    final completer = Completer<void>();
+    _queue.add(completer);
+    return completer.future;
+  }
+
+  void release() {
+    if (_queue.isNotEmpty) {
+      final next = _queue.removeAt(0);
+      next.complete();
+    } else {
+      _running--;
+    }
   }
 }
