@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # 支持在 GitHub 网页上人工点击“开始编译”
+  workflow_dispatch: # 支持人工点击编译
 
 jobs:
   build:
@@ -20,21 +20,24 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: 设置 Flutter 编译环境
+      - name: 设置 Flutter 编译环境 (使用极其兼容的经典版 3.13.0)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.x'
+          flutter-version: '3.13.0'
 
-      - name: 在云端自动补全安卓模板并合并代码
+      - name: 构建无拦截的安卓环境并升级底层 API 限制
         run: |
-          # 1. 在云端创建一个名为 iptv_app 的标准安卓空模板项目
-          # 保持原装的 settings.gradle 和 build.gradle 绝不修改，防止破坏 Flutter 原生编译链
+          # 1. 创建经典版安卓模板
           flutter create --platforms=android --org com.example.iptvtester iptv_app
           
-          # 2. 用我们仓库中自定义的 pubspec.yaml 覆盖模板中的配置（已使用标准开源版 ^5.1.0）
-          cp pubspec.yaml iptv_app/pubspec.yaml
+          # 2. 强行拉高安卓应用的最低运行版本到 API 24 (Android 7.0)，这是 FFmpeg 能够成功编译的硬性底线要求
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' iptv_app/android/app/build.gradle
           
-          # 3. 用我们仓库中自定义的 main.dart 覆盖模板中的代码
+          # 3. 追加全局仓库源，确保绝对不会出现找不到依赖的情况
+          echo -e "\nallprojects {\n    repositories {\n        google()\n        mavenCentral()\n    }\n}" >> iptv_app/android/build.gradle
+          
+          # 4. 覆盖配置文件和源码
+          cp pubspec.yaml iptv_app/pubspec.yaml
           cp lib/main.dart iptv_app/lib/main.dart
 
       - name: 拉取项目所需要的依赖包
