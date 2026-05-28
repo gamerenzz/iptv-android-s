@@ -20,35 +20,22 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.19.x
+          flutter-version: 3.19.x # 使用新版 Flutter 满足 SDK34 与新插件标准
 
-      - name: 强行在云端注入本地本地 Maven 缓存 (绕过所有联网阻碍)
+      - name: Create Project & Patch Custom Maven Whitelist (导入您发现的公共源)
         run: |
-          # 1. 创建本地 Maven 模拟目录
-          mkdir -p /home/runner/.m2/repository/com/arthenica/ffmpeg-kit-https/6.0-2
-          mkdir -p /home/runner/.m2/repository/com/arthenica/smart-exception-java/0.2.1
-          
-          # 2. 直接下载官方 AAR 与配置文件写入本地缓存
-          wget -q -O /home/runner/.m2/repository/com/arthenica/ffmpeg-kit-https/6.0-2/ffmpeg-kit-https-6.0-2.aar https://repo1.maven.org/maven2/com/arthenica/ffmpeg-kit-https/6.0-2/ffmpeg-kit-https-6.0-2.aar
-          wget -q -O /home/runner/.m2/repository/com/arthenica/ffmpeg-kit-https/6.0-2/ffmpeg-kit-https-6.0-2.pom https://repo1.maven.org/maven2/com/arthenica/ffmpeg-kit-https/6.0-2/ffmpeg-kit-https-6.0-2.pom
-          
-          # 3. 强行下载 ffmpeg 依赖的辅助包写入本地缓存
-          wget -q -O /home/runner/.m2/repository/com/arthenica/smart-exception-java/0.2.1/smart-exception-java-0.2.1.jar https://repo1.maven.org/maven2/com/arthenica/smart-exception-java/0.2.1/smart-exception-java-0.2.1.jar
-          wget -q -O /home/runner/.m2/repository/com/arthenica/smart-exception-java/0.2.1/smart-exception-java-0.2.1.pom https://repo1.maven.org/maven2/com/arthenica/smart-exception-java/0.2.1/smart-exception-java-0.2.1.pom
-
-      - name: Create Project & Patch Gradle Whitelist (构建双通道依赖解析)
-        run: |
-          # 1. 创建安卓原生模板项目
+          # 1. 创建原生安卓工程
           flutter create --platforms=android --org com.example.iptvtester iptv_app
           
-          # 2. 将 settings.gradle 中的 FAIL_ON_PROJECT_REPOS 替换为 PREFER_PROJECT (允许子插件自定义仓库)
+          # 2. 核心修复A：在 settings.gradle 中配置允许项目级自定义仓库，并追加您提供的公共托管源
           sed -i 's/FAIL_ON_PROJECT_REPOS/PREFER_PROJECT/g' iptv_app/android/settings.gradle || true
+          echo -e "\ndependencyResolutionManagement {\n    repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)\n    repositories {\n        google()\n        mavenCentral()\n        maven { url 'https://artifactory.appodeal.com/appodeal-public/' }\n    }\n}" >> iptv_app/android/settings.gradle
           
-          # 3. 提权最低安卓SDK要求到 24，这是 FFmpeg 运行的硬性底线要求
+          # 3. 核心修复B：向主 build.gradle 末尾注入全局仓库，指定去您找到的 appdeal 镜像源寻找依赖
+          echo -e "\nallprojects {\n    repositories {\n        google()\n        mavenCentral()\n        maven { url 'https://artifactory.appodeal.com/appodeal-public/' }\n    }\n}" >> iptv_app/android/build.gradle
+          
+          # 4. 提权最低安卓SDK要求到 24 (Android 7.0)，满足 FFmpeg 底层运行基线
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' iptv_app/android/app/build.gradle
-          
-          # 4. 在根 build.gradle 补入全局仓库定义，并强行将 mavenLocal() 置于最顶部，让编译引擎绝对优先读取我们刚才下载好的本地缓存！
-          echo -e "\nallprojects {\n    repositories {\n        mavenLocal()\n        google()\n        mavenCentral()\n    }\n}" >> iptv_app/android/build.gradle
           
           # 5. 强行在原生 Manifest 中注入 INTERNET 网络权限
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/g' iptv_app/android/app/src/main/AndroidManifest.xml
