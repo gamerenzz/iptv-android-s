@@ -341,7 +341,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _addLog("已删除选中的频道");
   }
 
-  // --- 新增：一键清理本地缓存并格式化重置界面 ---
+  // --- 一键清理本地缓存并格式化重置界面 ---
   Future<void> _clearCache() async {
     final directory = await getTemporaryDirectory();
     final dir = Directory(directory.path);
@@ -522,9 +522,14 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     if (!await dir.exists()) return;
 
     List<FileSystemEntity> files = dir.listSync();
+    
+    // 修复 2：彻底弃用容易引发冲突的 String 扩展，直接采用标准健全的 Dart 字符串校验
     List<String> cachedFiles = files
         .map((e) => e.path.split('/').last)
-        .where((f) => f.lower().endswith(('.m3u', '.txt')))
+        .where((f) {
+          final nameLower = f.toLowerCase();
+          return nameLower.endsWith('.m3u') || nameLower.endsWith('.txt');
+        })
         .toList();
 
     if (cachedFiles.isEmpty) {
@@ -620,7 +625,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                 TextButton(onPressed: () => _selectAll(false), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("反选", style: TextStyle(fontSize: 12))),
                 TextButton(onPressed: _deleteSelected, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("删除", style: TextStyle(fontSize: 12, color: Colors.red))),
                 
-                // 新增：黄色的清理缓存按钮，位于“删除”右侧
+                // 清理按钮，位于“删除”右侧
                 TextButton(onPressed: _clearCache, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("清理", style: TextStyle(fontSize: 12, color: Colors.orange))),
                 
                 const Spacer(),
@@ -732,7 +737,30 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   }
 }
 
-// 兼容低版本
-extension on String {
-  bool lower() => this.toLowerCase() != "";
+// --- 修复 1：在文件最底部重新完整补上缺失的信号量类定义，确保编译通过 ---
+class SimpleSemaphore {
+  final int maxConcurrent;
+  int _running = 0;
+  final List<Completer<void>> _queue = [];
+
+  SimpleSemaphore(this.maxConcurrent);
+
+  Future<void> acquire() async {
+    if (_running < maxConcurrent) {
+      _running++;
+      return;
+    }
+    final completer = Completer<void>();
+    _queue.add(completer);
+    return completer.future;
+  }
+
+  void release() {
+    if (_queue.isNotEmpty) {
+      final next = _queue.removeAt(0);
+      next.complete();
+    } else {
+      _running--;
+    }
+  }
 }
