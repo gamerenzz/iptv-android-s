@@ -13,7 +13,7 @@ dependencies:
   http: ^1.1.0                    
   path_provider: ^2.1.1           
   shared_preferences: ^2.2.1      
-  ffmpeg_kit_flutter_min_gpl: ^5.1.0  
+  ffmpeg_kit_flutter_min_gpl: ^6.0.3
 
 flutter:
   uses-material-design: true
