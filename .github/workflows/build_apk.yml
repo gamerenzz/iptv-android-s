@@ -25,14 +25,107 @@ jobs:
       - name: Create Project
         run: flutter create --platforms=android --org com.example.iptvtester iptv_app
 
-      - name: Inject Android Permission
+      - name: Inject Kotlin Native Bridge & Copy Files
         run: |
+          # 1. 强行在原生 Manifest 中注入 INTERNET 网络权限
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/g' iptv_app/android/app/src/main/AndroidManifest.xml
+          
+          # 2. 写入极其健壮的 Kotlin 原生 MediaPlayer 桥接解析通道 (完美避开 FFmpeg 编译死锁)
+          mkdir -p iptv_app/android/app/src/main/kotlin/com/example/iptvtester
+          cat << 'EOF' > iptv_app/android/app/src/main/kotlin/com/example/iptvtester/MainActivity.kt
+          package com.example.iptvtester
 
-      - name: Copy Project Files
-        run: |
+          import android.media.MediaPlayer
+          import android.os.Handler
+          import android.os.Looper
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity: FlutterActivity() {
+              private val CHANNEL = "com.example.iptvtester/resolution"
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      if (call.method == "getResolution") {
+                          val url = call.argument<String>("url")
+                          if (url != null) {
+                              getVideoResolution(url, result)
+                          } else {
+                              result.error("BAD_ARGS", "URL is null", null)
+                          }
+                      } else {
+                          result.notImplemented()
+                      }
+                  }
+              }
+
+              private fun getVideoResolution(url: String, result: MethodChannel.Result) {
+                  val mediaPlayer = MediaPlayer()
+                  var isResponded = false
+
+                  val handler = Handler(Looper.getMainLooper())
+                  // 强力防死锁：限制单个系统播放器最大握手时长为 3.5 秒，超时自动释放，保障并发平滑
+                  val timeoutRunnable = Runnable {
+                      if (!isResponded) {
+                          isResponded = true
+                          try {
+                              mediaPlayer.release()
+                          } catch (e: Exception) {}
+                          result.success("未检测")
+                      }
+                  }
+                  handler.postDelayed(timeoutRunnable, 3500)
+
+                  try {
+                      mediaPlayer.setDataSource(url)
+                      mediaPlayer.setOnPreparedListener {
+                          val width = mediaPlayer.videoWidth
+                          val height = mediaPlayer.videoHeight
+                          if (!isResponded) {
+                              isResponded = true
+                              handler.removeCallbacks(timeoutRunnable)
+                              mediaPlayer.release()
+                              if (width > 0 && height > 0) {
+                                  result.success("${width}x${height}")
+                              } else {
+                                  result.success("音频流")
+                              }
+                          }
+                      }
+                      mediaPlayer.setOnVideoSizeChangedListener { _, width, height ->
+                          if (width > 0 && height > 0 && !isResponded) {
+                              isResponded = true
+                              handler.removeCallbacks(timeoutRunnable)
+                              mediaPlayer.release()
+                              result.success("${width}x${height}")
+                          }
+                      }
+                      mediaPlayer.setOnErrorListener { _, _, _ ->
+                          if (!isResponded) {
+                              isResponded = true
+                              handler.removeCallbacks(timeoutRunnable)
+                              mediaPlayer.release()
+                              result.success("异常")
+                          }
+                          true
+                      }
+                      mediaPlayer.prepareAsync()
+                  } catch (e: Exception) {
+                      if (!isResponded) {
+                          isResponded = true
+                          handler.removeCallbacks(timeoutRunnable)
+                          mediaPlayer.release()
+                          result.success("未检测")
+                      }
+                  }
+              }
+          }
+          EOF
+
+          # 3. 复制前端工程文件
           cp pubspec.yaml iptv_app/pubspec.yaml
-
           mkdir -p iptv_app/lib
           cp lib/main.dart iptv_app/lib/main.dart
 
