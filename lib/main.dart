@@ -110,8 +110,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     if (saved != null && saved.trim().isNotEmpty) {
       _urlController.text = saved;
     } else {
-      _urlController.text =
-          "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u";
+      _urlController.text = "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u";
     }
   }
 
@@ -343,7 +342,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _addLog("已删除选中的频道");
   }
 
-  // --- 联动重构：支持毫秒级进度显示的并发测速 ---
+  // --- 重构：常驻工人并发消费队列 + 8秒单通道防死锁绝对硬超时限制 ---
   Future<void> _startTest() async {
     List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
     if (_isTesting || targets.isEmpty) {
@@ -353,40 +352,56 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
     int total = targets.length;
     int tested = 0;
+    int nextIndex = 0; // 下一个待领取的任务下标
 
     setState(() {
       _isTesting = true;
       _statusText = "测速进度: 0 / $total";
     });
-    _addLog("开始并发测速（已启用302自适应重定向和1KB极速缓存解析）");
+    _addLog("启动极速无锁常驻队列测速。总数: $total，最大并发: 15 线程，单通道绝对硬超时限制: 8 秒");
 
-    // 用于封装并执行单个渠道任务，执行完后立刻原子级增加已测数，并在UI上实现毫秒级进度刷新
-    Future<void> _runWithProgress(Channel ch) async {
-      await _testSingleChannel(ch);
-      tested++;
-      setState(() {
-        _statusText = "测速中: $tested / $total";
-      });
+    // 定义常驻工人的工作行为
+    Future<void> worker() async {
+      while (_isTesting) {
+        int currentIndex = -1;
+        
+        // 线程安全领任务
+        if (nextIndex < targets.length) {
+          currentIndex = nextIndex;
+          nextIndex++;
+        } else {
+          break; // 列表被消费完毕，工人退出
+        }
+
+        Channel ch = targets[currentIndex];
+        try {
+          // 核心优化：为每一个视频源的探测（连接+解析）套上 8 秒的 Dart 绝对物理硬超时锁！
+          // 无论是由于网络阻塞、连接僵死还是 C++ 层 FFmpeg 发生不可逆死锁，时间一到直接切断并记录，工人绝不驻留！
+          await _testSingleChannel(ch).timeout(const Duration(seconds: 8));
+        } catch (_) {
+          ch.status = "探测超时";
+          ch.delay = "-";
+          ch.resolution = "-";
+        } finally {
+          tested++;
+          setState(() {
+            _statusText = "测速中: $tested / $total";
+          });
+        }
+      }
     }
 
-    const concurrency = 25; // 并发 25 线程测速
-    for (int i = 0; i < targets.length; i += concurrency) {
-      if (!_isTesting) {
-        _addLog("测速任务已被手动停止");
-        break;
-      }
-      int end = (i + concurrency < targets.length) ? i + concurrency : targets.length;
-      List<Future> futures = [];
-      for (int j = i; j < end; j++) {
-        futures.add(_runWithProgress(targets[j])); // 运行带有即时状态回传的任务
-      }
-      await Future.wait(futures);
-      setState(() => _applySort());
-    }
+    // 启动 15 个并发常驻工人同时从任务列表中“抢”任务
+    int activeWorkers = targets.length < 15 ? targets.length : 15;
+    List<Future<void>> workers = List.generate(activeWorkers, (_) => worker());
+
+    // 等待所有常驻工人把队列全部消费完毕
+    await Future.wait(workers);
 
     setState(() {
       _isTesting = false;
       _statusText = "测速完成，共测速 $tested 个频道";
+      _applySort();
     });
   }
 
@@ -415,7 +430,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       if (response.statusCode == 200 || response.statusCode == 206) {
         ch.status = "在线";
         
-        // --- 核心：多线程信号量限制。只有测速成功在线的，才排队进入原生 FFprobe 深度探测画质（同时最多 2 个） ---
+        // 信号量并发限制：排队进入原生 FFprobe 进行分辨率嗅探（同时限制 2 个进程）
         await _resSemaphore.acquire();
         try {
           ch.resolution = await _detectResolutionNative(ch.url);
@@ -491,9 +506,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text("IPTV 测速工具 (FFmpeg终极版)", style: TextStyle(fontSize: 18)),
-      ),
+      appBar: AppBar(title: const Text("IPTV 测速与抓源工具 (原生深度解析)", style: TextStyle(fontSize: 18))),
       body: Column(
         children: [
           Padding(
@@ -502,32 +515,17 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
               controller: _urlController,
               maxLines: 3,
               style: const TextStyle(fontSize: 12),
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                hintText: "每行一个 M3U 订阅地址",
-              ),
+              decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "每行一个M3U/TXT地址"),
             ),
           ),
-          
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
-              ElevatedButton(
-                onPressed: _startBatchDownload,
-                child: const Text("下载导入"),
-              ),
-              ElevatedButton(
-                onPressed: _startTest,
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.green[50]),
-                child: const Text("开始测速", style: TextStyle(color: Colors.green)),
-              ),
-              ElevatedButton(
-                onPressed: () => setState(() => _isTesting = false),
-                child: const Text("停止"),
-              ),
+              ElevatedButton(onPressed: _startBatchDownload, child: const Text("下载导入")),
+              ElevatedButton(onPressed: _startTest, style: ElevatedButton.styleFrom(backgroundColor: Colors.green[50]), child: const Text("测速勾选项", style: TextStyle(color: Colors.green))),
+              ElevatedButton(onPressed: () => setState(() => _isTesting = false), child: const Text("停止")),
             ],
           ),
-          
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
             child: Row(
@@ -549,10 +547,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                     decoration: const InputDecoration(hintText: "限迟", isDense: true),
                   ),
                 ),
-                IconButton(
-                  onPressed: _clearFilterText,
-                  icon: const Icon(Icons.refresh),
-                )
+                IconButton(onPressed: _clearFilterText, icon: const Icon(Icons.refresh))
               ],
             ),
           ),
@@ -562,59 +557,21 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             child: Row(
               children: [
-                TextButton(
-                  onPressed: () => _selectAll(true),
-                  style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)),
-                  child: const Text("全选", style: TextStyle(fontSize: 12)),
-                ),
-                TextButton(
-                  onPressed: () => _selectAll(false),
-                  style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)),
-                  child: const Text("反选", style: TextStyle(fontSize: 12)),
-                ),
-                TextButton(
-                  onPressed: _deleteSelected,
-                  style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)),
-                  child: const Text("删除", style: TextStyle(fontSize: 12, color: Colors.red)),
-                ),
+                TextButton(onPressed: () => _selectAll(true), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("全选", style: TextStyle(fontSize: 12))),
+                TextButton(onPressed: () => _selectAll(false), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("反选", style: TextStyle(fontSize: 12))),
+                TextButton(onPressed: _deleteSelected, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("删除", style: TextStyle(fontSize: 12, color: Colors.red))),
+                
                 const Spacer(),
-                InkWell(
-                  onTap: () => _triggerSort(SortType.name),
-                  child: Padding(
-                    padding: const EdgeInsets.all(4.0),
-                    child: Text("名称${_getSortIcon(SortType.name)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                  ),
-                ),
+                
+                InkWell(onTap: () => _triggerSort(SortType.name), child: Padding(padding: const EdgeInsets.all(4.0), child: Text("名称${_getSortIcon(SortType.name)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)))),
                 const SizedBox(width: 4),
-                InkWell(
-                  onTap: () => _triggerSort(SortType.delay),
-                  child: Padding(
-                    padding: const EdgeInsets.all(4.0),
-                    child: Text("延迟${_getSortIcon(SortType.delay)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                  ),
-                ),
+                InkWell(onTap: () => _triggerSort(SortType.delay), child: Padding(padding: const EdgeInsets.all(4.0), child: Text("延迟${_getSortIcon(SortType.delay)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)))),
                 const SizedBox(width: 4),
-                InkWell(
-                  onTap: () => _triggerSort(SortType.resolution),
-                  child: Padding(
-                    padding: const EdgeInsets.all(4.0),
-                    child: Text("分辨率${_getSortIcon(SortType.resolution)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                  ),
-                ),
+                InkWell(onTap: () => _triggerSort(SortType.resolution), child: Padding(padding: const EdgeInsets.all(4.0), child: Text("分辨率${_getSortIcon(SortType.resolution)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)))),
               ],
             ),
           ),
-
-          Container(
-            width: double.infinity,
-            color: Colors.grey[100],
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Text(
-              _statusText,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
-            ),
-          ),
-
+          
           Expanded(
             child: ListView.builder(
               itemCount: _visibleChannels.length > 500 ? 500 : _visibleChannels.length,
@@ -626,14 +583,8 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                     contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
                     leading: Checkbox(
                       value: ch.isSelected,
-                      onChanged: (v) {
-                        setState(() {
-                          ch.isSelected = v ?? false;
-                        });
-                      },
+                      onChanged: (val) => setState(() => ch.isSelected = val ?? false),
                     ),
-                    
-                    // --- 核心优化A：将来源（ch.sourceName）直接以高亮浅蓝显示在标题右侧，免去点击查看的步骤 ---
                     title: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -653,29 +604,13 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                     subtitle: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          ch.url,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Colors.grey, fontSize: 10),
-                        ),
+                        Text(ch.url, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.grey, fontSize: 10)),
                         const SizedBox(height: 2),
                         Row(
                           children: [
-                            Text(
-                              "状态: ${ch.status}  ",
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: ch.status == "在线" ? Colors.green : Colors.red,
-                              ),
-                            ),
-                            Text("延迟: ${ch.delay} ms  ", style: const TextStyle(fontSize: 11)),
-                            Expanded(
-                              child: Text(
-                                "分辨率: ${ch.resolution}",
-                                style: const TextStyle(fontSize: 10, color: Colors.blueGrey),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
+                            Text("状态:${ch.status}  ", style: TextStyle(fontSize: 11, color: ch.status == "在线" ? Colors.green : Colors.red)),
+                            Text("延迟:${ch.delay}  ", style: const TextStyle(fontSize: 11)),
+                            Expanded(child: Text("分:${ch.resolution}", style: const TextStyle(fontSize: 10, color: Colors.blueGrey), overflow: TextOverflow.ellipsis)),
                           ],
                         )
                       ],
@@ -684,11 +619,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                       icon: const Icon(Icons.copy, color: Colors.blue),
                       onPressed: () => _copyUrl(ch.url, ch.name),
                     ),
-                    onTap: () {
-                      setState(() {
-                        _selectedSourceInfo = ch.sourceName;
-                      });
-                    },
+                    onTap: () => setState(() => _selectedSourceInfo = ch.sourceName),
                   ),
                 );
               },
@@ -697,10 +628,10 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
           ExpansionTile(
             title: const Text("调试日志面板 (点击展开)", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-            collapsedBackgroundColor: Colors.grey[50],
+            collapsedBackgroundColor: Colors.grey[100],
             children: [
               Container(
-                height: 120,
+                height: 150,
                 width: double.infinity,
                 color: Colors.black87,
                 child: Stack(
@@ -727,16 +658,11 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ],
           ),
 
-          // 底部来源
           Container(
             width: double.infinity,
             color: Colors.blue[50],
             padding: const EdgeInsets.all(6),
-            child: Text(
-              "当前选中频道来源: $_selectedSourceInfo",
-              style: const TextStyle(color: Colors.blue, fontSize: 11, fontWeight: FontWeight.bold),
-              overflow: TextOverflow.ellipsis,
-            ),
+            child: Text(" $_statusText | 选中源: $_selectedSourceInfo", style: const TextStyle(color: Colors.blue, fontSize: 11, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
           )
         ],
       ),
