@@ -6,8 +6,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'dart:io';
 import 'dart:async';
+import 'dart:convert';
 
-// --- 全局忽略 SSL 证书错误 ---
 class MyHttpOverrides extends HttpOverrides {
   @override
   HttpClient createHttpClient(SecurityContext? context) {
@@ -19,6 +19,7 @@ class MyHttpOverrides extends HttpOverrides {
 
 void main() {
   HttpOverrides.global = MyHttpOverrides();
+
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
     home: IPTVTesterHome(),
@@ -41,11 +42,16 @@ class Channel {
     this.status = "待测",
     this.delay = "-",
     this.resolution = "-",
-    this.isSelected = false,
+    this.isSelected = true,
   });
 }
 
-enum SortType { none, name, delay, resolution }
+enum SortType {
+  none,
+  name,
+  delay,
+  resolution,
+}
 
 class IPTVTesterHome extends StatefulWidget {
   const IPTVTesterHome({super.key});
@@ -56,66 +62,91 @@ class IPTVTesterHome extends StatefulWidget {
 
 class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   final TextEditingController _urlController = TextEditingController();
-  final TextEditingController _filterController = TextEditingController();
-  final TextEditingController _delayController = TextEditingController();
+
+  final TextEditingController _filterController =
+      TextEditingController();
+
+  final TextEditingController _delayController =
+      TextEditingController();
 
   List<Channel> _allChannels = [];
+
   List<Channel> _visibleChannels = [];
+
   final List<String> _logs = [];
 
   bool _isDownloading = false;
+
   bool _isTesting = false;
 
   String _statusText = "等待导入数据...";
+
   String _selectedSourceInfo = "尚未选中频道";
 
   Timer? _debounce;
 
   SortType _currentSort = SortType.none;
-  bool _isAscending = true;
 
-  // 限制同时最多只有 3 个原生播放器向系统请求画质（防止过载）
-  final SimpleSemaphore _resSemaphore = SimpleSemaphore(3); 
+  bool _isAscending = true;
 
   @override
   void initState() {
     super.initState();
+
     _loadSavedUrls();
+
     _addLog("系统初始化完成");
   }
 
   void _addLog(String msg) {
     setState(() {
-      String time = DateTime.now().toLocal().toString().substring(11, 19);
+      String time =
+          DateTime.now().toLocal().toString().substring(11, 19);
+
       _logs.insert(0, "[$time] $msg");
-      if (_logs.length > 80) _logs.removeLast();
+
+      if (_logs.length > 80) {
+        _logs.removeLast();
+      }
     });
   }
 
   Future<void> _loadSavedUrls() async {
     final prefs = await SharedPreferences.getInstance();
+
     String? saved = prefs.getString("saved_urls");
+
     if (saved != null && saved.trim().isNotEmpty) {
       _urlController.text = saved;
     } else {
-      _urlController.text = "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u";
+      _urlController.text =
+          "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u";
     }
   }
 
   Future<void> _saveUrls() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString("saved_urls", _urlController.text);
+
+    await prefs.setString(
+      "saved_urls",
+      _urlController.text,
+    );
   }
 
   Future<void> _startBatchDownload() async {
     if (_isDownloading) return;
+
     await _saveUrls();
 
     setState(() {
       _isDownloading = true;
-      _statusText = "开始强制下载...";
+
+      _statusText = "开始下载...";
+
       _allChannels.clear();
+
       _visibleChannels.clear();
+
       _logs.clear();
     });
 
@@ -129,80 +160,120 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     if (urls.isEmpty) {
       setState(() {
         _isDownloading = false;
+
         _statusText = "没有有效URL";
       });
-      _addLog("错误: 没有读取到有效的链接");
+
       return;
     }
 
-    _addLog("准备并发强制下载 ${urls.length} 个链接");
     int success = 0;
+
     final directory = await getTemporaryDirectory();
+
     List<Future> tasks = [];
 
     for (String url in urls) {
-      tasks.add(_downloadSingle(url, directory.path).then((ok) {
-        if (ok) success++;
-      }));
+      tasks.add(
+        _downloadSingle(url, directory.path).then((ok) {
+          if (ok) success++;
+        }),
+      );
     }
 
     await Future.wait(tasks);
 
     setState(() {
       _visibleChannels = List.from(_allChannels);
+
       _applySort();
+
       _isDownloading = false;
-      _statusText = "下载完成 成功 $success/${urls.length}，共 ${_allChannels.length} 个频道";
+
+      _statusText =
+          "下载完成 成功 $success/${urls.length} 共 ${_allChannels.length} 个频道";
     });
-    _addLog("下载任务结束");
   }
 
-  Future<bool> _downloadSingle(String url, String dir) async {
-    _addLog("-> 请求: $url");
+  Future<bool> _downloadSingle(
+    String url,
+    String dir,
+  ) async {
     try {
       final uri = Uri.parse(url);
+
       final response = await http.get(
-        uri, 
+        uri,
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "Cache-Control": "no-cache",
-          "Pragma": "no-cache"
-        }
-      ).timeout(const Duration(seconds: 15));
-      
+          "User-Agent": "Mozilla/5.0",
+        },
+      ).timeout(
+        const Duration(seconds: 15),
+      );
+
       if (response.statusCode != 200) {
-        _addLog("<- 失败 HTTP ${response.statusCode}");
         return false;
       }
-      
-      String fileName = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : "playlist.m3u";
+
+      String fileName =
+          uri.pathSegments.isNotEmpty
+              ? uri.pathSegments.last
+              : "playlist.m3u";
+
       final file = File("$dir/$fileName");
+
       await file.writeAsBytes(response.bodyBytes);
+
       _parseFile(response.body, fileName);
-      _addLog("<- 成功导入: $fileName");
+
       return true;
-    } catch (e) {
-      _addLog("<- 异常: ${e.toString().split(':').last}");
+    } catch (_) {
       return false;
     }
   }
 
-  void _parseFile(String content, String sourceName) {
+  void _parseFile(
+    String content,
+    String sourceName,
+  ) {
     List<String> lines = content.split('\n');
+
     String tempName = "未知频道";
+
     for (String line in lines) {
       line = line.trim();
+
       if (line.startsWith("#EXTINF")) {
-        final match = RegExp(r',([^,]+)$').firstMatch(line);
-        if (match != null) tempName = match.group(1)!.trim();
-      } else if (line.isNotEmpty && !line.startsWith("#")) {
+        final match =
+            RegExp(r',([^,]+)$').firstMatch(line);
+
+        if (match != null) {
+          tempName = match.group(1)!.trim();
+        }
+      } else if (
+          line.isNotEmpty &&
+          !line.startsWith("#")) {
         if (line.contains(",")) {
           List<String> parts = line.split(",");
+
           if (parts.length >= 2) {
-            _allChannels.add(Channel(name: parts[0].trim(), url: parts[1].trim(), sourceName: sourceName, isSelected: true));
+            _allChannels.add(
+              Channel(
+                name: parts[0].trim(),
+                url: parts[1].trim(),
+                sourceName: sourceName,
+              ),
+            );
           }
         } else {
-          _allChannels.add(Channel(name: tempName, url: line, sourceName: sourceName, isSelected: true));
+          _allChannels.add(
+            Channel(
+              name: tempName,
+              url: line,
+              sourceName: sourceName,
+            ),
+          );
+
           tempName = "未知频道";
         }
       }
@@ -211,39 +282,70 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   void _onFilterChanged() {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 300), _applyFilter);
+
+    _debounce = Timer(
+      const Duration(milliseconds: 300),
+      _applyFilter,
+    );
   }
 
   void _applyFilter() {
     String kw = _filterController.text.trim();
-    int? maxDelay = int.tryParse(_delayController.text.trim());
-    List<String> keywords = kw.split(RegExp(r'[,，\s]+')).map(normalizeText).where((e) => e.isNotEmpty).toList();
+
+    int? maxDelay =
+        int.tryParse(_delayController.text.trim());
+
+    List<String> keywords = kw
+        .split(RegExp(r'[,，\s]+'))
+        .map(normalizeText)
+        .where((e) => e.isNotEmpty)
+        .toList();
 
     setState(() {
-      _visibleChannels = _allChannels.where((ch) {
+      _visibleChannels =
+          _allChannels.where((ch) {
         bool textMatch = true;
+
         if (keywords.isNotEmpty) {
-          textMatch = keywords.any((k) => normalizeText(ch.name).contains(k));
+          textMatch = keywords.any(
+            (k) =>
+                normalizeText(ch.name).contains(k),
+          );
         }
+
         bool delayMatch = true;
+
         if (maxDelay != null) {
           if (ch.status != "在线") {
             delayMatch = false;
           } else {
             int? d = int.tryParse(ch.delay);
-            if (d == null || d > maxDelay) delayMatch = false;
+
+            if (d == null || d > maxDelay) {
+              delayMatch = false;
+            }
           }
         }
+
         return textMatch && delayMatch;
       }).toList();
+
       _applySort();
-      _statusText = "筛选 ${_visibleChannels.length} 个频道";
+
+      _statusText =
+          "筛选 ${_visibleChannels.length} 个频道";
     });
   }
 
   String normalizeText(String text) {
-    text = text.toLowerCase().replaceAll(RegExp(r'[\s\-_#\[\]\(\)（）【】]'), '');
-    return text;
+    return text
+        .toLowerCase()
+        .replaceAll(
+          RegExp(
+            r'[\s\-_#\[\]\(\)（）【】]',
+          ),
+          '',
+        );
   }
 
   void _triggerSort(SortType type) {
@@ -252,8 +354,10 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
         _isAscending = !_isAscending;
       } else {
         _currentSort = type;
+
         _isAscending = true;
       }
+
       _applySort();
     });
   }
@@ -263,31 +367,62 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
     _visibleChannels.sort((a, b) {
       int result = 0;
+
       if (_currentSort == SortType.name) {
         result = a.name.compareTo(b.name);
-      } else if (_currentSort == SortType.delay) {
-        int delayA = int.tryParse(a.delay) ?? (_isAscending ? 999999 : -1);
-        int delayB = int.tryParse(b.delay) ?? (_isAscending ? 999999 : -1);
+      } else if (_currentSort ==
+          SortType.delay) {
+        int delayA =
+            int.tryParse(a.delay) ?? 999999;
+
+        int delayB =
+            int.tryParse(b.delay) ?? 999999;
+
         result = delayA.compareTo(delayB);
-      } else if (_currentSort == SortType.resolution) {
-        int resA = _parseResValue(a.resolution);
-        int resB = _parseResValue(b.resolution);
+      } else if (_currentSort ==
+          SortType.resolution) {
+        int resA =
+            _parseResValue(a.resolution);
+
+        int resB =
+            _parseResValue(b.resolution);
+
         result = resA.compareTo(resB);
       }
-      return _isAscending ? result : -result;
+
+      return _isAscending
+          ? result
+          : -result;
     });
   }
 
   int _parseResValue(String res) {
-    if (res.contains("4K")) return 2160;
-    final match = RegExp(r'(\d+)p').firstMatch(res);
-    if (match != null) return int.tryParse(match.group(1) ?? "0") ?? 0;
-    if (res.contains("标清")) return 480;
-    return 0; 
+    if (res.contains("4K")) {
+      return 2160;
+    }
+
+    final match =
+        RegExp(r'(\d+)p').firstMatch(res);
+
+    if (match != null) {
+      return int.tryParse(
+            match.group(1) ?? "0",
+          ) ??
+          0;
+    }
+
+    if (res.contains("标清")) {
+      return 480;
+    }
+
+    return 0;
   }
 
   String _getSortIcon(SortType type) {
-    if (_currentSort != type) return "";
+    if (_currentSort != type) {
+      return "";
+    }
+
     return _isAscending ? " ▲" : " ▼";
   }
 
@@ -301,306 +436,300 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   void _deleteSelected() {
     setState(() {
-      _allChannels.removeWhere((ch) => ch.isSelected);
+      _allChannels.removeWhere(
+        (ch) => ch.isSelected,
+      );
+
       _applyFilter();
     });
-    _addLog("已删除选中的频道");
   }
 
-  // --- 并发 25 测速控制逻辑 ---
   Future<void> _startTest() async {
-    List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
-    
+    List<Channel> targets =
+        _visibleChannels
+            .where((ch) => ch.isSelected)
+            .toList();
+
     if (_isTesting || targets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("请先勾选需要测速的频道")));
       return;
     }
 
     setState(() {
       _isTesting = true;
-      _statusText = "开始测速 ${targets.length} 个选中源...";
-    });
-    _addLog("开始并发测速（已启用302自适应重定向和1KB极限缓存拦截）");
 
-    const concurrency = 25; 
-    for (int i = 0; i < targets.length; i += concurrency) {
-      if (!_isTesting) {
-        _addLog("测速已被手动停止");
-        break;
-      }
-      int end = (i + concurrency < targets.length) ? i + concurrency : targets.length;
+      _statusText =
+          "开始测速 ${targets.length} 个频道...";
+    });
+
+    const concurrency = 12;
+
+    for (
+      int i = 0;
+      i < targets.length;
+      i += concurrency
+    ) {
+      if (!_isTesting) break;
+
+      int end =
+          (i + concurrency < targets.length)
+              ? i + concurrency
+              : targets.length;
+
       List<Future> futures = [];
+
       for (int j = i; j < end; j++) {
-        futures.add(_testSingleChannel(targets[j]));
+        futures.add(
+          _testSingleChannel(targets[j]),
+        );
       }
+
       await Future.wait(futures);
-      setState(() => _applySort());
+
+      setState(() {});
     }
 
     setState(() {
       _isTesting = false;
+
       _statusText = "测速完成";
     });
   }
 
-  // --- 核心重构：http.get 配合 Range 极限探测 ---
-  Future<void> _testSingleChannel(Channel ch) async {
+  Future<void> _testSingleChannel(
+    Channel ch,
+  ) async {
     Stopwatch sw = Stopwatch()..start();
-    try {
-      final client = http.Client();
-      
-      // 发送标准的 GET 请求，但附加 Range 头，命令服务器只返回前 1KB 的数据
-      final response = await client.get(
-        Uri.parse(ch.url),
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Range": "bytes=0-1024", // 关键：只拉取 1KB，既能测出首包响应时间，又绝对不会卡死或浪费流量
-          "Accept": "*/*",
-          "Connection": "keep-alive"
-        },
-      ).timeout(const Duration(seconds: 4)); // 适当放宽至 4 秒超时以容纳慢速 TLS 握手
-      
-      sw.stop();
-      client.close();
 
-      ch.delay = sw.elapsedMilliseconds.toString();
-      
-      // 200 (OK) 或 206 (Partial Content 分片返回，说明Range成功截断了视频) 均视为在线
-      if (response.statusCode == 200 || response.statusCode == 206) {
+    HttpClient? client;
+
+    try {
+      client = HttpClient();
+
+      client.connectionTimeout =
+          const Duration(seconds: 4);
+
+      final request =
+          await client.getUrl(
+        Uri.parse(ch.url),
+      );
+
+      request.headers.set(
+        "User-Agent",
+        "Mozilla/5.0",
+      );
+
+      request.headers.set(
+        "Range",
+        "bytes=0-1023",
+      );
+
+      final response =
+          await request.close();
+
+      List<int> bytes = [];
+
+      await for (var chunk
+          in response.timeout(
+        const Duration(seconds: 4),
+      )) {
+        bytes.addAll(chunk);
+
+        if (bytes.length >= 1024) {
+          break;
+        }
+      }
+
+      sw.stop();
+
+      ch.delay =
+          sw.elapsedMilliseconds.toString();
+
+      if (response.statusCode == 200 ||
+          response.statusCode == 206) {
         ch.status = "在线";
-        
-        // 意外之喜：因为已经下载了前 1KB 字节，M3U8 的分辨率标签刚好就在这里，直接在这里解析！
-        ch.resolution = _parseResolutionFromContent(response.body);
+
+        String body = "";
+
+        try {
+          body = utf8.decode(bytes);
+        } catch (_) {}
+
+        ch.resolution =
+            _parseResolutionFromContent(
+          body,
+        );
       } else {
-        ch.status = "HTTP ${response.statusCode}";
+        ch.status =
+            "HTTP ${response.statusCode}";
+
         ch.delay = "-";
+
         ch.resolution = "-";
       }
     } catch (_) {
       ch.status = "离线";
+
       ch.delay = "-";
+
       ch.resolution = "-";
+    } finally {
+      client?.close(force: true);
     }
   }
 
-  // 极速解析法：从已经获取到的 1KB 字节内容中提取分辨率
-  String _parseResolutionFromContent(String body) {
+  String _parseResolutionFromContent(
+    String body,
+  ) {
     if (!body.contains("#EXTM3U")) {
-      return "非M3U8文本流"; // 如果前 1KB 连 M3U8 标识都没有，必然是 TS 直连流
+      return "未知";
     }
-    final match = RegExp(r'RESOLUTION=(\d+)[xX](\d+)', caseSensitive: false).firstMatch(body);
+
+    final match = RegExp(
+      r'RESOLUTION=(\d+)[xX](\d+)',
+      caseSensitive: false,
+    ).firstMatch(body);
+
     if (match == null) {
-      return "单层流无分辨率"; // 单层 M3U8 没有多级画质，不包含 RESOLUTION 标签
+      return "单层流";
     }
-    int width = int.parse(match.group(1)!);
-    int height = int.parse(match.group(2)!);
+
+    int width =
+        int.parse(match.group(1)!);
+
+    int height =
+        int.parse(match.group(2)!);
+
     String res = "${width}x$height";
 
-    if (height >= 1080) return "1080p ($res)";
-    if (height >= 720) return "720p ($res)";
+    if (height >= 2160) {
+      return "4K ($res)";
+    }
+
+    if (height >= 1080) {
+      return "1080p ($res)";
+    }
+
+    if (height >= 720) {
+      return "720p ($res)";
+    }
+
     return "标清 ($res)";
   }
 
-  void _copyUrl(String url, String name) {
-    Clipboard.setData(ClipboardData(text: url));
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("已复制 $name"), duration: const Duration(seconds: 1)),
+  void _copyUrl(
+    String url,
+    String name,
+  ) {
+    Clipboard.setData(
+      ClipboardData(text: url),
     );
-  }
 
-  void _copyAllLogs() {
-    Clipboard.setData(ClipboardData(text: _logs.join("\n")));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("已复制所有调试日志"), duration: const Duration(seconds: 1)),
+    ScaffoldMessenger.of(context)
+        .showSnackBar(
+      SnackBar(
+        content: Text("已复制 $name"),
+      ),
     );
-  }
-
-  void _clearFilterText() {
-    _filterController.clear();
-    _delayController.clear();
-    _applyFilter();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("IPTV 测速与抓源工具", style: TextStyle(fontSize: 18))),
+      appBar: AppBar(
+        title: const Text(
+          "IPTV 测速工具",
+        ),
+      ),
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.all(4),
+            padding:
+                const EdgeInsets.all(4),
             child: TextField(
               controller: _urlController,
               maxLines: 3,
-              style: const TextStyle(fontSize: 12),
-              decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "每行一个M3U/TXT地址"),
+              decoration:
+                  const InputDecoration(
+                border:
+                    OutlineInputBorder(),
+                hintText:
+                    "每行一个 M3U 地址",
+              ),
             ),
           ),
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            mainAxisAlignment:
+                MainAxisAlignment
+                    .spaceEvenly,
             children: [
-              ElevatedButton(onPressed: _startBatchDownload, child: const Text("下载导入")),
-              ElevatedButton(onPressed: _startTest, style: ElevatedButton.styleFrom(backgroundColor: Colors.green[50]), child: const Text("测速勾选项", style: TextStyle(color: Colors.green))),
-              ElevatedButton(onPressed: () => setState(() => _isTesting = false), child: const Text("停止")),
+              ElevatedButton(
+                onPressed:
+                    _startBatchDownload,
+                child:
+                    const Text("下载导入"),
+              ),
+              ElevatedButton(
+                onPressed: _startTest,
+                child:
+                    const Text("测速"),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  setState(() {
+                    _isTesting = false;
+                  });
+                },
+                child:
+                    const Text("停止"),
+              ),
             ],
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _filterController,
-                    onChanged: (_) => _onFilterChanged(),
-                    decoration: const InputDecoration(hintText: "关键词", isDense: true),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                SizedBox(
-                  width: 80,
-                  child: TextField(
-                    controller: _delayController,
-                    keyboardType: TextInputType.number,
-                    onChanged: (_) => _onFilterChanged(),
-                    decoration: const InputDecoration(hintText: "限迟", isDense: true),
-                  ),
-                ),
-                IconButton(onPressed: () {
-                  _filterController.clear();
-                  _delayController.clear();
-                  _applyFilter();
-                }, icon: const Icon(Icons.refresh))
-              ],
-            ),
-          ),
-          
-          Container(
-            color: Colors.grey[200],
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-            child: Row(
-              children: [
-                TextButton(onPressed: () => _selectAll(true), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("全选", style: TextStyle(fontSize: 12))),
-                TextButton(onPressed: () => _selectAll(false), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("反选", style: TextStyle(fontSize: 12))),
-                TextButton(onPressed: _deleteSelected, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("删除", style: TextStyle(fontSize: 12, color: Colors.red))),
-                
-                const Spacer(),
-                
-                InkWell(onTap: () => _triggerSort(SortType.name), child: Padding(padding: const EdgeInsets.all(4.0), child: Text("名称${_getSortIcon(SortType.name)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)))),
-                const SizedBox(width: 4),
-                InkWell(onTap: () => _triggerSort(SortType.delay), child: Padding(padding: const EdgeInsets.all(4.0), child: Text("延迟${_getSortIcon(SortType.delay)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)))),
-                const SizedBox(width: 4),
-                InkWell(onTap: () => _triggerSort(SortType.resolution), child: Padding(padding: const EdgeInsets.all(4.0), child: Text("分辨率${_getSortIcon(SortType.resolution)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)))),
-              ],
-            ),
-          ),
-          
           Expanded(
             child: ListView.builder(
-              itemCount: _visibleChannels.length > 500 ? 500 : _visibleChannels.length,
-              itemBuilder: (context, index) {
-                final ch = _visibleChannels[index];
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
-                    leading: Checkbox(
-                      value: ch.isSelected,
-                      onChanged: (val) => setState(() => ch.isSelected = val ?? false),
+              itemCount:
+                  _visibleChannels.length,
+              itemBuilder:
+                  (context, index) {
+                final ch =
+                    _visibleChannels[index];
+
+                return ListTile(
+                  leading: Checkbox(
+                    value:
+                        ch.isSelected,
+                    onChanged: (v) {
+                      setState(() {
+                        ch.isSelected =
+                            v ??
+                                false;
+                      });
+                    },
+                  ),
+                  title: Text(
+                    ch.name,
+                    overflow:
+                        TextOverflow
+                            .ellipsis,
+                  ),
+                  subtitle: Text(
+                    "${ch.status} | ${ch.delay}ms | ${ch.resolution}",
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(
+                      Icons.copy,
                     ),
-                    title: Text(ch.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14), overflow: TextOverflow.ellipsis),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(ch.url, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.grey, fontSize: 10)),
-                        const SizedBox(height: 2),
-                        Row(
-                          children: [
-                            Text("状态:${ch.status}  ", style: TextStyle(fontSize: 11, color: ch.status == "在线" ? Colors.green : Colors.red)),
-                            Text("延迟:${ch.delay}  ", style: const TextStyle(fontSize: 11)),
-                            Expanded(child: Text("分:${ch.resolution}", style: const TextStyle(fontSize: 10, color: Colors.blueGrey), overflow: TextOverflow.ellipsis)),
-                          ],
-                        )
-                      ],
+                    onPressed: () =>
+                        _copyUrl(
+                      ch.url,
+                      ch.name,
                     ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.copy, color: Colors.blue),
-                      onPressed: () => _copyUrl(ch.url, ch.name),
-                    ),
-                    onTap: () => setState(() => _selectedSourceInfo = ch.sourceName),
                   ),
                 );
               },
             ),
           ),
-
-          ExpansionTile(
-            title: const Text("调试日志面板 (点击展开)", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-            collapsedBackgroundColor: Colors.grey[100],
-            children: [
-              Container(
-                height: 150,
-                width: double.infinity,
-                color: Colors.black87,
-                child: Stack(
-                  children: [
-                    SingleChildScrollView(
-                      padding: const EdgeInsets.all(8),
-                      child: SelectableText(
-                        _logs.join("\n"),
-                        style: const TextStyle(color: Colors.greenAccent, fontSize: 10, fontFamily: "monospace"),
-                      ),
-                    ),
-                    Positioned(
-                      right: 0,
-                      top: 0,
-                      child: IconButton(
-                        icon: const Icon(Icons.copy_all, color: Colors.white),
-                        tooltip: "复制全部日志",
-                        onPressed: _copyAllLogs,
-                      ),
-                    )
-                  ],
-                ),
-              ),
-            ],
-          ),
-
-          Container(
-            width: double.infinity,
-            color: Colors.blue[50],
-            padding: const EdgeInsets.all(6),
-            child: Text(" $_statusText | 选中源: $_selectedSourceInfo", style: const TextStyle(color: Colors.blue, fontSize: 11, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
-          )
         ],
       ),
     );
-  }
-}
-
-// --- 信号量类定义 ---
-class SimpleSemaphore {
-  final int maxConcurrent;
-  int _running = 0;
-  final List<Completer<void>> _queue = [];
-
-  SimpleSemaphore(this.maxConcurrent);
-
-  Future<void> acquire() async {
-    if (_running < maxConcurrent) {
-      _running++;
-      return;
-    }
-    final completer = Completer<void>();
-    _queue.add(completer);
-    return completer.future;
-  }
-
-  void release() {
-    if (_queue.isNotEmpty) {
-      final next = _queue.removeAt(0);
-      next.complete();
-    } else {
-      _running--;
-    }
   }
 }
