@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+// 导入官方标准的 FFprobe 接口
+import 'package:ffmpeg_kit_flutter/ffprobe_kit.dart';
 
 import 'dart:io';
 import 'dart:async';
@@ -81,11 +83,14 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   SortType _currentSort = SortType.none;
   bool _isAscending = true;
 
+  // 限制同时最多只有 2 个原生 FFprobe 核心在后台解析视频，防止发热或卡死
+  final SimpleSemaphore _resSemaphore = SimpleSemaphore(2); 
+
   @override
   void initState() {
     super.initState();
     _loadSavedUrls();
-    _addLog("系统初始化完成 (纯 Dart 极速版)");
+    _addLog("系统初始化完成 (原生 FFmpeg 画质探测版)");
   }
 
   void _addLog(String msg) {
@@ -121,7 +126,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
     setState(() {
       _isDownloading = true;
-      _statusText = "开始下载...";
+      _statusText = "开始强制下载...";
       _allChannels.clear();
       _visibleChannels.clear();
       _logs.clear();
@@ -139,11 +144,11 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
         _isDownloading = false;
         _statusText = "没有有效URL";
       });
-      _addLog("错误: 没有有效 URL 链接");
+      _addLog("错误: 没有读取到有效的链接");
       return;
     }
 
-    _addLog("开始并行下载 ${urls.length} 个不重复的链接...");
+    _addLog("准备并发强制下载 ${urls.length} 个链接");
     int success = 0;
     final directory = await getTemporaryDirectory();
     List<Future> tasks = [];
@@ -165,7 +170,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _statusText =
           "下载完成 成功 $success/${urls.length} 共 ${_allChannels.length} 个频道";
     });
-    _addLog("批量下载导入结束。");
+    _addLog("下载任务结束");
   }
 
   Future<bool> _downloadSingle(String url, String dir) async {
@@ -176,7 +181,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
         uri,
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-          "Cache-Control": "no-cache", // 强制不缓存，确保每次都重新下载最新数据
+          "Cache-Control": "no-cache", 
           "Pragma": "no-cache"
         },
       ).timeout(const Duration(seconds: 15));
@@ -188,6 +193,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
       String fileName =
           uri.pathSegments.isNotEmpty ? uri.pathSegments.last : "playlist.m3u";
+
       final file = File("$dir/$fileName");
       await file.writeAsBytes(response.bodyBytes);
       _parseFile(response.body, fileName);
@@ -337,22 +343,26 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _addLog("已删除选中的频道");
   }
 
+  // --- 并发测速 ---
   Future<void> _startTest() async {
     List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
     if (_isTesting || targets.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("请勾选需要测速的频道")));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("请先勾选需要测速的频道")));
       return;
     }
 
     setState(() {
       _isTesting = true;
-      _statusText = "开始测速 ${targets.length} 个频道...";
+      _statusText = "开始测速 ${targets.length} 个选中源...";
     });
     _addLog("开始并发测速（已启用302自适应重定向和1KB极速缓存解析）");
 
     const concurrency = 25; // 并发 25 线程测速
     for (int i = 0; i < targets.length; i += concurrency) {
-      if (!_isTesting) break;
+      if (!_isTesting) {
+        _addLog("测速任务已被手动停止");
+        break;
+      }
       int end = (i + concurrency < targets.length) ? i + concurrency : targets.length;
       List<Future> futures = [];
       for (int j = i; j < end; j++) {
@@ -392,11 +402,14 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
       if (response.statusCode == 200 || response.statusCode == 206) {
         ch.status = "在线";
-        String body = "";
+        
+        // --- 核心：多线程信号量限制。只有测速成功在线的，才排队进入原生 FFprobe 深度探测画质（同时最多 2 个） ---
+        await _resSemaphore.acquire();
         try {
-          body = utf8.decode(bytes);
-        } catch (_) {}
-        ch.resolution = _parseResolutionFromContent(body);
+          ch.resolution = await _detectResolutionNative(ch.url);
+        } finally {
+          _resSemaphore.release();
+        }
       } else {
         ch.status = "HTTP ${response.statusCode}";
         ch.delay = "-";
@@ -411,22 +424,36 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
-  String _parseResolutionFromContent(String body) {
-    if (!body.contains("#EXTM3U")) {
-      return "非M3U8文本流";
-    }
-    final match = RegExp(r'RESOLUTION=(\d+)[xX](\d+)', caseSensitive: false).firstMatch(body);
-    if (match == null) {
-      return "单层流无分辨率";
-    }
-    int width = int.parse(match.group(1)!);
-    int height = int.parse(match.group(2)!);
-    String res = "${width}x$height";
+  // --- 调用原生平台 FFprobe 极速探测分辨率 ---
+  Future<String> _detectResolutionNative(String url) async {
+    try {
+      String targetUrl = url;
+      // 智能无后缀暗示
+      if (!url.toLowerCase().contains(".m3u8") && !url.toLowerCase().contains(".ts")) {
+        targetUrl = "$url#.m3u8";
+      }
 
-    if (height >= 2160) return "4K ($res)";
-    if (height >= 1080) return "1080p ($res)";
-    if (height >= 720) return "720p ($res)";
-    return "标清 ($res)";
+      // 在后台静默运行 FFprobe，限制 probesize 为 150KB 以内，分析时间限制在 1 秒以内
+      final session = await FFprobeKit.execute(
+        "-v error -user_agent 'Mozilla/5.0' -probesize 150000 -analyzeduration 1000000 -allowed_extensions ALL -protocol_whitelist 'file,http,https,tcp,tls,crypto' -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 '$targetUrl'"
+      );
+      
+      final output = await session.getOutput();
+      if (output != null && output.trim().isNotEmpty) {
+        final match = RegExp(r'(\d+)x(\d+)').firstMatch(output);
+        if (match != null) {
+          int width = int.parse(match.group(1)!);
+          int height = int.parse(match.group(2)!);
+          String resStr = "${width}x$height";
+          
+          if (height >= 2160) return "4K ($resStr)";
+          if (height >= 1080) return "1080p ($resStr)";
+          if (height >= 720) return "720p ($resStr)";
+          return "标清 ($resStr)";
+        }
+      }
+    } catch (_) {}
+    return "未知";
   }
 
   void _copyUrl(String url, String name) {
@@ -453,11 +480,10 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("IPTV 测速工具", style: TextStyle(fontSize: 18)),
+        title: const Text("IPTV 测速工具 (FFmpeg终极版)", style: TextStyle(fontSize: 18)),
       ),
       body: Column(
         children: [
-          // 1. 订阅输入框
           Padding(
             padding: const EdgeInsets.all(4),
             child: TextField(
@@ -471,7 +497,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
           
-          // 2. 主操作按钮行
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
@@ -491,7 +516,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ],
           ),
           
-          // 3. 双重即时过滤框
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
             child: Row(
@@ -521,7 +545,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
           
-          // 4. 管理控制条 (全选, 反选, 删除, 排序表头)
           Container(
             color: Colors.grey[200],
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
@@ -570,7 +593,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
 
-          // 5. 数据状态显示行
           Container(
             width: double.infinity,
             color: Colors.grey[100],
@@ -581,7 +603,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
 
-          // 6. 频道列表渲染
           Expanded(
             child: ListView.builder(
               itemCount: _visibleChannels.length > 500 ? 500 : _visibleChannels.length,
@@ -649,7 +670,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
 
-          // 7. 可收缩的调试日志面板
           ExpansionTile(
             title: const Text("调试日志面板 (点击展开)", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
             collapsedBackgroundColor: Colors.grey[50],
@@ -682,7 +702,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ],
           ),
 
-          // 8. 底部频道来源条
           Container(
             width: double.infinity,
             color: Colors.blue[50],
@@ -696,5 +715,33 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
         ],
       ),
     );
+  }
+}
+
+// --- 信号量类（防止原生并发崩溃） ---
+class SimpleSemaphore {
+  final int maxConcurrent;
+  int _running = 0;
+  final List<Completer<void>> _queue = [];
+
+  SimpleSemaphore(this.maxConcurrent);
+
+  Future<void> acquire() async {
+    if (_running < maxConcurrent) {
+      _running++;
+      return;
+    }
+    final completer = Completer<void>();
+    _queue.add(completer);
+    return completer.future;
+  }
+
+  void release() {
+    if (_queue.isNotEmpty) {
+      final next = _queue.removeAt(0);
+      next.complete();
+    } else {
+      _running--;
+    }
   }
 }
