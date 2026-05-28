@@ -1,7 +1,6 @@
 name: iptv_tester
 description: A multi-threaded IPTV Speed Tester and Resolution Detector for Android.
 publish_to: 'none'
-
 version: 1.0.0+1
 
 environment:
