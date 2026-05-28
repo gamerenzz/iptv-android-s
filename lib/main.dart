@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+// 导入官方标准的 FFprobe 接口
 import 'package:ffmpeg_kit_flutter_full_gpl/ffprobe_kit.dart';
 
 import 'dart:io';
@@ -82,6 +83,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   SortType _currentSort = SortType.none;
   bool _isAscending = true;
 
+  // 限制同时最多只有 2 个原生 FFprobe 核心在后台解析视频，防止发热或卡死
   final SimpleSemaphore _resSemaphore = SimpleSemaphore(2); 
 
   @override
@@ -130,13 +132,11 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _logs.clear();
     });
 
-    // 读取原始输入的列表（保留空行和重复，用以提取绝对行号）
     List<String> rawUrls = _urlController.text
         .split('\n')
         .map((e) => e.trim())
         .toList();
 
-    // 智能去重并保留其在输入框中首次出现的 1-based 原始行号
     List<MapEntry<int, String>> uniqueIndexedUrls = [];
     Set<String> seen = {};
     for (int i = 0; i < rawUrls.length; i++) {
@@ -144,7 +144,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       if (url.startsWith("http")) {
         if (!seen.contains(url)) {
           seen.add(url);
-          uniqueIndexedUrls.add(MapEntry(i + 1, url)); // i + 1 即为绝对行号
+          uniqueIndexedUrls.add(MapEntry(i + 1, url)); 
         }
       }
     }
@@ -158,14 +158,14 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       return;
     }
 
-    _addLog("共提取到 ${uniqueIndexedUrls.length} 个去重后的链接，开始并行强制下载...");
+    _addLog("准备并发强制下载 ${uniqueIndexedUrls.length} 个链接");
     int success = 0;
     final directory = await getTemporaryDirectory();
     List<Future> tasks = [];
 
     for (var entry in uniqueIndexedUrls) {
-      int idx = entry.key;      // 原始绝对行号
-      String url = entry.value; // URL 链接
+      int idx = entry.key;      
+      String url = entry.value; 
       tasks.add(
         _downloadSingle(url, directory.path, idx).then((ok) {
           if (ok) success++;
@@ -179,12 +179,11 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _visibleChannels = List.from(_allChannels);
       _applySort();
       _isDownloading = false;
-      _statusText = "下载完成 成功 $success/${uniqueIndexedUrls.length}，共 ${_allChannels.length} 个频道";
+      _statusText = "下载完成 成功 $success/${uniqueIndexedUrls.length} 共 ${_allChannels.length} 个频道";
     });
     _addLog("下载任务结束");
   }
 
-  // 修改：接收绝对行号 idx，强制用行号前缀命名本地文件
   Future<bool> _downloadSingle(String url, String dir, int idx) async {
     _addLog("-> 请求 [$idx]: $url");
     try {
@@ -204,8 +203,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       }
       
       String fileName = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : "playlist.m3u";
-      
-      // 核心修改A：强制格式化为 "行号.文件名" (例如 "2.live.txt")。即使前一个下载失败，本行序号依然保持不变
       String localFileName = "$idx.$fileName";
       final file = File("$dir/$localFileName");
       
@@ -226,7 +223,9 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       line = line.trim();
       if (line.startsWith("#EXTINF")) {
         final match = RegExp(r',([^,]+)$').firstMatch(line);
-        if (match != null) tempName = match.group(1)!.trim();
+        if (match != null) {
+          tempName = match.group(1)!.trim();
+        }
       } else if (line.isNotEmpty && !line.startsWith("#")) {
         if (line.contains(",")) {
           List<String> parts = line.split(",");
@@ -263,7 +262,9 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             delayMatch = false;
           } else {
             int? d = int.tryParse(ch.delay);
-            if (d == null || d > maxDelay) delayMatch = false;
+            if (d == null || d > maxDelay) {
+              delayMatch = false;
+            }
           }
         }
         return textMatch && delayMatch;
@@ -340,6 +341,40 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _addLog("已删除选中的频道");
   }
 
+  // --- 新增：一键清理本地缓存并格式化重置界面 ---
+  Future<void> _clearCache() async {
+    final directory = await getTemporaryDirectory();
+    final dir = Directory(directory.path);
+    if (!await dir.exists()) return;
+
+    try {
+      List<FileSystemEntity> files = dir.listSync();
+      int deletedCount = 0;
+      for (var file in files) {
+        // 安全检测：只删除 M3U 和 TXT 格式的缓存数据
+        if (file is File && (file.path.endsWith('.m3u') || file.path.endsWith('.txt'))) {
+          await file.delete();
+          deletedCount++;
+        }
+      }
+
+      // 重置应用状态
+      setState(() {
+        _allChannels.clear();
+        _visibleChannels.clear();
+        _statusText = "已安全清空缓存，共清理 $deletedCount 个本地文件";
+        _selectedSourceInfo = "尚未选中频道";
+      });
+
+      _addLog("本地缓存清理成功，共删除 $deletedCount 个文件");
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("本地缓存文件已全部清空！"), duration: Duration(seconds: 1)),
+      );
+    } catch (e) {
+      _addLog("清空缓存失败: ${e.toString()}");
+    }
+  }
+
   // --- 并发测速 ---
   Future<void> _startTest() async {
     List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
@@ -358,7 +393,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     });
     _addLog("开始并发测速（已启用302自适应重定向和1KB极速缓存解析）");
 
-    // 用于封装并执行单个渠道任务，执行完后立刻原子级增加已测数，并在UI上实现毫秒级进度刷新
     Future<void> _runWithProgress(Channel ch) async {
       await _testSingleChannel(ch);
       tested++;
@@ -367,7 +401,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       });
     }
 
-    const concurrency = 25; // 并发 25 线程测速
+    const concurrency = 25; 
     for (int i = 0; i < targets.length; i += concurrency) {
       if (!_isTesting) {
         _addLog("测速任务已被手动停止");
@@ -376,7 +410,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       int end = (i + concurrency < targets.length) ? i + concurrency : targets.length;
       List<Future> futures = [];
       for (int j = i; j < end; j++) {
-        futures.add(_runWithProgress(targets[j])); // 运行带有即时状态回传的任务
+        futures.add(_runWithProgress(targets[j])); 
       }
       await Future.wait(futures);
       setState(() => _applySort());
@@ -413,7 +447,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       if (response.statusCode == 200 || response.statusCode == 206) {
         ch.status = "在线";
         
-        // 信号量并发限制：排队进入原生 FFprobe 进行分辨率嗅探（同时限制 2 个进程）
         await _resSemaphore.acquire();
         try {
           ch.resolution = await _detectResolutionNative(ch.url);
@@ -434,16 +467,13 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
-  // --- 调用原生平台 FFprobe 极速探测分辨率 ---
   Future<String> _detectResolutionNative(String url) async {
     try {
       String targetUrl = url;
-      // 智能无后缀暗示
       if (!url.toLowerCase().contains(".m3u8") && !url.toLowerCase().contains(".ts")) {
         targetUrl = "$url#.m3u8";
       }
 
-      // 在后台静默运行 FFprobe，限制 probesize 为 150KB 以内，分析时间限制在 1 秒以内
       final session = await FFprobeKit.execute(
         "-v error -user_agent 'Mozilla/5.0' -probesize 150000 -analyzeduration 1000000 -allowed_extensions ALL -protocol_whitelist 'file,http,https,tcp,tls,crypto' -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 '$targetUrl'"
       );
@@ -486,9 +516,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _applyFilter();
   }
 
-  // --- 本地缓存自然数值排序逻辑 ---
   void load_local_cache() async {
-    // 增加自动创建缓存目录判断
     final directory = await getTemporaryDirectory();
     final dir = Directory(directory.path);
     if (!await dir.exists()) return;
@@ -496,7 +524,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     List<FileSystemEntity> files = dir.listSync();
     List<String> cachedFiles = files
         .map((e) => e.path.split('/').last)
-        .where((f) => f.lower().endsWith(('.m3u', '.txt')))
+        .where((f) => f.lower().endswith(('.m3u', '.txt')))
         .toList();
 
     if (cachedFiles.isEmpty) {
@@ -504,7 +532,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       return;
     }
 
-    // 核心修改B：智能识别文件名开头的数字前缀（例如 "3.result.txt" 中的 "3"），并按其数值进行自然升序排列，完美重现历史订阅顺序
     cachedFiles.sort((a, b) {
       final reg = RegExp(r'^(\d+)\.');
       final matchA = reg.firstMatch(a);
@@ -593,6 +620,9 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                 TextButton(onPressed: () => _selectAll(false), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("反选", style: TextStyle(fontSize: 12))),
                 TextButton(onPressed: _deleteSelected, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("删除", style: TextStyle(fontSize: 12, color: Colors.red))),
                 
+                // 新增：黄色的清理缓存按钮，位于“删除”右侧
+                TextButton(onPressed: _clearCache, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("清理", style: TextStyle(fontSize: 12, color: Colors.orange))),
+                
                 const Spacer(),
                 
                 InkWell(onTap: () => _triggerSort(SortType.name), child: Padding(padding: const EdgeInsets.all(4.0), child: Text("名称${_getSortIcon(SortType.name)}", style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)))),
@@ -627,7 +657,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        // 标题右侧直观展示带绝对序号的来源，例如 "2.live.txt"
                         Text(
                           ch.sourceName,
                           style: const TextStyle(color: Colors.blue, fontSize: 11, fontWeight: FontWeight.bold),
