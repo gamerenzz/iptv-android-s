@@ -20,36 +20,37 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.19.x
+          flutter-version: 3.19.x # 回归最新 3.19 稳定版
 
-      - name: Create Project & Patch Gradle Whitelist (构建双通道依赖解析链)
+      - name: Create Project & Patch minSdkVersion
         run: |
-          # 1. 创建安卓原生模板项目
+          # 1. 创建标准安卓原生模板项目
           flutter create --platforms=android --org com.example.iptvtester iptv_app
           
-          # 2. 核心修复A：将 settings.gradle 中的 FAIL_ON_PROJECT_REPOS 替换为 PREFER_PROJECT (允许子插件自定义仓库)
-          sed -i 's/FAIL_ON_PROJECT_REPOS/PREFER_PROJECT/g' iptv_app/android/settings.gradle || true
-          
-          # 3. 核心修复B：向主 build.gradle 末尾追加全局仓库链 (这一步配合PREFER_PROJECT，彻底打通 FFmpeg 底层 AAR 下载通道)
-          echo -e "\nallprojects {\n    repositories {\n        google()\n        mavenCentral()\n    }\n}" >> iptv_app/android/build.gradle
-          
-          # 4. 提权最低安卓SDK要求到 24，这是 FFmpeg 运行的硬性底线要求
+          # 2. 提权最低安卓SDK要求到 24，这是 FFmpeg 运行的硬性底线要求
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' iptv_app/android/app/build.gradle
           
-          # 5. 强行在原生 Manifest 中注入 INTERNET 网络权限
+          # 3. 强行在原生 Manifest 中注入 INTERNET 网络权限
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/g' iptv_app/android/app/src/main/AndroidManifest.xml
 
-          # 6. 覆盖配置文件与源码
+          # 4. 复制配置文件与源码
           cp pubspec.yaml iptv_app/pubspec.yaml
           mkdir -p iptv_app/lib
           cp lib/main.dart iptv_app/lib/main.dart
 
-      - name: Flutter Pub Get
+      - name: Flutter Pub Get (拉取插件到云端缓存)
         run: |
           cd iptv_app
           flutter pub get
 
-      - name: Build APK
+      - name: 自动注入 Appodeal 官方镜像源到 ffmpeg 插件中
+        run: |
+          # 核心绝杀：直接在云端缓存中定位 ffmpeg_kit 插件的 build.gradle，
+          # 强行在其内部的 repositories 块中注入 google()、mavenCentral() 以及 Appodeal 官方制品库镜像！
+          # 这将直接解决插件自身不继承宿主仓库、在云端找不到 AAR 依赖的终极难题。
+          find /home/runner/.pub-cache/hosted/pub.dev/ -name "build.gradle" -path "*/ffmpeg_kit_flutter*/android/build.gradle" -exec sed -i 's/repositories {/repositories {\n        google()\n        mavenCentral()\n        maven { url "https:\/\/artifactory.appodeal.com\/appodeal-public" }/g' {} \;
+
+      - name: Build APK (Release)
         run: |
           cd iptv_app
           flutter build apk --release
