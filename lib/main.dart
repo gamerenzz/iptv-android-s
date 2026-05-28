@@ -3,10 +3,37 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:video_player/video_player.dart'; // 引入官方播放器插件
 
 import 'dart:io';
 import 'dart:async';
+
+// --- 轻量级信号量控制锁，用于限制原生播放器画质解析的并发数 ---
+class SimpleSemaphore {
+  final int maxConcurrent;
+  int _running = 0;
+  final List<Completer<void>> _queue = [];
+
+  SimpleSemaphore(this.maxConcurrent);
+
+  Future<void> acquire() async {
+    if (_running < maxConcurrent) {
+      _running++;
+      return;
+    }
+    final completer = Completer<void>();
+    _queue.add(completer);
+    return completer.future;
+  }
+
+  void release() {
+    if (_queue.isNotEmpty) {
+      final next = _queue.removeAt(0);
+      next.complete();
+    } else {
+      _running--;
+    }
+  }
+}
 
 class MyHttpOverrides extends HttpOverrides {
   @override
@@ -74,11 +101,16 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   SortType _currentSort = SortType.none;
   bool _isAscending = true;
 
+  // --- 原生桥接通道 ---
+  static const _platform = MethodChannel('com.example.iptvtester/resolution');
+  // 限制同时只有 2 个原生播放器进行分辨率探测，防止手机卡死
+  final SimpleSemaphore _resSemaphore = SimpleSemaphore(2); 
+
   @override
   void initState() {
     super.initState();
     _loadSavedUrls();
-    _addLog("系统初始化完成，已忽略 SSL 校验");
+    _addLog("系统初始化完成");
   }
 
   void _addLog(String msg) {
@@ -132,7 +164,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       return;
     }
 
-    _addLog("准备并发强制下载 ${urls.length} 个链接");
+    _addLog("准备下载 ${urls.length} 个链接");
     int success = 0;
     final directory = await getTemporaryDirectory();
     List<Future> tasks = [];
@@ -161,7 +193,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       final response = await http.get(
         uri, 
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "User-Agent": "Mozilla/5.0",
           "Cache-Control": "no-cache",
           "Pragma": "no-cache"
         }
@@ -174,7 +206,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       
       String fileName = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : "playlist.m3u";
       final file = File("$dir/$fileName");
-      
       await file.writeAsBytes(response.bodyBytes);
       _parseFile(response.body, fileName);
       _addLog("<- 成功导入: $fileName");
@@ -190,7 +221,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     String tempName = "未知频道";
     for (String line in lines) {
       line = line.trim();
-      if (line.startsWith("#EXTINF")) {
+      if (line.startswith("#EXTINF")) {
         final match = RegExp(r',([^,]+)$').firstMatch(line);
         if (match != null) tempName = match.group(1)!.trim();
       } else if (line.isNotEmpty && !line.startsWith("#")) {
@@ -303,11 +334,9 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _applyFilter();
     });
     _addLog("已删除选中的频道");
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("已删除选中的频道"), duration: Duration(seconds: 1)),
-    );
   }
 
+  // --- 并发 10~30 测速控制逻辑 ---
   Future<void> _startTest() async {
     List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
     
@@ -320,9 +349,10 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _isTesting = true;
       _statusText = "开始测速 ${targets.length} 个选中源...";
     });
-    _addLog("启动并发测速，目标数量: ${targets.length}");
+    _addLog("并发测速中...");
 
-    const concurrency = 10;
+    // 并发测速设置为 25 (满足 10~30 并发测速要求)
+    const concurrency = 25; 
     for (int i = 0; i < targets.length; i += concurrency) {
       if (!_isTesting) {
         _addLog("测速已被手动停止");
@@ -349,14 +379,21 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       final client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 3);
       final request = await client.getUrl(Uri.parse(ch.url));
-      request.headers.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+      request.headers.set("User-Agent", "Mozilla/5.0");
       final response = await request.close();
       sw.stop();
       
       ch.delay = sw.elapsedMilliseconds.toString();
       if (response.statusCode == 200) {
         ch.status = "在线";
-        ch.resolution = await _detectResolution(ch.url);
+        
+        // --- 核心限制：必须获取信号量锁，保证后台同时最多只有 2 个播放器正在向安卓索要分辨率 ---
+        await _resSemaphore.acquire();
+        try {
+          ch.resolution = await _detectResolutionNative(ch.url);
+        } finally {
+          _resSemaphore.release();
+        }
       } else {
         ch.status = "HTTP ${response.statusCode}";
       }
@@ -368,70 +405,31 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
-  // --- 双重画质识别核心（方案B核心） ---
-  Future<String> _detectResolution(String url) async {
-    // 1. 第一步：尝试极速文本分析法 (仅花0.05秒，如果是 Master Playlist 可直接读出标签)
+  // 调用安卓原生 MediaPlayer 通道解析分辨率
+  Future<String> _detectResolutionNative(String url) async {
     try {
-      final response = await http.get(
-        Uri.parse(url),
-        headers: {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-      ).timeout(const Duration(seconds: 1)); // 极速限时 1 秒
-
-      if (response.statusCode == 200 && response.body.contains("#EXTM3U")) {
-        final match = RegExp(r'RESOLUTION=(\d+)[xX](\d+)', caseSensitive: false).firstMatch(response.body);
-        if (match != null) {
-          int width = int.parse(match.group(1)!);
-          int height = int.parse(match.group(2)!);
-          String res = "${width}x$height";
-          _addLog("画质：通过文本模式秒级匹配成功 -> $res");
-          if (height >= 1080) return "1080p ($res)";
-          if (height >= 720) return "720p ($res)";
-          return "标清 ($res)";
-        }
+      final String result = await _platform.invokeMethod('getResolution', {'url': url});
+      if (result == "未知" || result == "探测失败" || result == "异常") {
+        return result;
       }
-    } catch (_) {}
-
-    // 2. 第二步：如果第一步失败（单层流或直连 .ts 视频），启动后台 ExoPlayer 嗅探真实的视频轨道（限时 4 秒）
-    VideoPlayerController? controller;
-    try {
-      controller = VideoPlayerController.networkUrl(
-        Uri.parse(url),
-        // 关键：向底层播放器引擎注入伪装 User-Agent，规避服务器拉流限制
-        httpHeaders: {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-      );
-      
-      // 限制 4 秒强制超时，防止卡在死链上
-      await controller.initialize().timeout(const Duration(seconds: 4));
-      
-      if (controller.value.isInitialized) {
-        final size = controller.value.size;
-        int width = size.width.toInt();
-        int height = size.height.toInt();
-        if (width > 0 && height > 0) {
-          String res = "${width}x$height";
-          _addLog("画质：通过后台 ExoPlayer 解码探测成功 -> $res");
-          await controller.dispose();
-          if (height >= 2160) return "4K ($res)";
-          if (height >= 1080) return "1080p ($res)";
-          if (height >= 720) return "720p ($res)";
-          return "标清 ($res)";
-        }
+      final parts = result.split('x');
+      if (parts.length == 2) {
+        int height = int.tryParse(parts[1]) ?? 0;
+        if (height >= 2160) return "4K ($result)";
+        if (height >= 1080) return "1080p ($result)";
+        if (height >= 720) return "720p ($result)";
+        return "标清 ($result)";
       }
-    } catch (_) {
-    } finally {
-      if (controller != null) {
-        try {
-          await controller.dispose();
-        } catch (_) {}
-      }
+      return result;
+    } catch (e) {
+      return "未知";
     }
-    return "未知";
   }
 
   void _copyUrl(String url, String name) {
     Clipboard.setData(ClipboardData(text: url));
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("已复制 $name"), duration: const Duration(seconds: 1)),
+      SnackBar(content: Text("已复制 ${ch.name}"), duration: const Duration(seconds: 1)),
     );
   }
 
@@ -501,7 +499,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
           
-          // --- 操作栏 (全选 + 反选 + 删除 + 排序) ---
           Container(
             color: Colors.grey[200],
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
@@ -522,7 +519,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
           
-          // --- 频道列表 ---
           Expanded(
             child: ListView.builder(
               itemCount: _visibleChannels.length > 500 ? 500 : _visibleChannels.length,
@@ -562,7 +558,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
 
-          // --- 调试日志面板 ---
           ExpansionTile(
             title: const Text("调试日志面板 (点击展开)", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
             collapsedBackgroundColor: Colors.grey[100],
@@ -595,7 +590,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ],
           ),
 
-          // 底部状态
           Container(
             width: double.infinity,
             color: Colors.blue[50],
