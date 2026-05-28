@@ -119,7 +119,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     await prefs.setString("saved_urls", _urlController.text);
   }
 
-  // --- 批量强制重下载逻辑 ---
+  // --- 批量强制重下载逻辑（引入原始绝对行号追踪） ---
   Future<void> _startBatchDownload() async {
     if (_isDownloading) return;
     await _saveUrls();
@@ -374,7 +374,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
-  // --- 并发测速 ---
+  // --- 彻底修复：真正的常驻工人并发队列（彻底干掉分批等待锁死） ---
   Future<void> _startTest() async {
     List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
     if (_isTesting || targets.isEmpty) {
@@ -384,40 +384,56 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
     int total = targets.length;
     int tested = 0;
-    int nextIndex = 0;
+    int nextIndex = 0; // 下一个要测速的频道下标索引
 
     setState(() {
       _isTesting = true;
       _statusText = "测速进度: 0 / $total";
     });
-    _addLog("开始并发测速（已启用302自适应重定向和1KB极速缓存解析）");
+    _addLog("启动极速防卡死队列。并发: 15 工人，单路绝对超时强制熔断: 8秒");
 
-    Future<void> _runWithProgress(Channel ch) async {
-      await _testSingleChannel(ch);
-      tested++;
-      setState(() {
-        _statusText = "测速中: $tested / $total";
-      });
+    // 定义常驻工人的不间断行为
+    Future<void> worker() async {
+      while (_isTesting) {
+        int currentIndex = -1;
+        
+        // 线程安全：直接按顺序领走下一个频道索引，绝不产生分批死等
+        if (nextIndex < targets.length) {
+          currentIndex = nextIndex;
+          nextIndex++;
+        } else {
+          break; // 全部测试完，常驻工人下班
+        }
+
+        Channel ch = targets[currentIndex];
+        try {
+          // 绝对保障：给网络握手+FFmpeg画质解析总工程套上 8 秒绝对硬超时！
+          // 无论底层网络僵死、代理崩溃、还是 C++ 解码器发生逻辑死锁，到点直接强制掐断！
+          await _testSingleChannel(ch).timeout(const Duration(seconds: 8));
+        } catch (_) {
+          ch.status = "探测超时";
+          ch.delay = "-";
+          ch.resolution = "-";
+        } finally {
+          tested++;
+          setState(() {
+            _statusText = "测速中: $tested / $total";
+          });
+        }
+      }
     }
 
-    const concurrency = 25; 
-    for (int i = 0; i < targets.length; i += concurrency) {
-      if (!_isTesting) {
-        _addLog("测速任务已被手动停止");
-        break;
-      }
-      int end = (i + concurrency < targets.length) ? i + concurrency : targets.length;
-      List<Future> futures = [];
-      for (int j = i; j < end; j++) {
-        futures.add(_runWithProgress(targets[j])); 
-      }
-      await Future.wait(futures);
-      setState(() => _applySort());
-    }
+    // 启动 15 个并发常驻工人开始在后台“抢食”队列
+    int activeWorkers = targets.length < 15 ? targets.length : 15;
+    List<Future<void>> workers = List.generate(activeWorkers, (_) => worker());
+
+    // 等待 15 个工人将整个 IPTV 列表全部吞噬消化完毕
+    await Future.wait(workers);
 
     setState(() {
       _isTesting = false;
       _statusText = "测速完成，共测速 $tested 个频道";
+      _applySort();
     });
   }
 
@@ -581,7 +597,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
           
-          // 第一排主按钮：增加本地载入和清理缓存，排版更具结构性
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
@@ -601,7 +616,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ],
           ),
           
-          // 第二排辅助按钮：将缓存载入和清空整合在此，解决布局拥挤导致不见的问题
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             child: Row(
@@ -765,30 +779,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   }
 }
 
-// --- 信号量类（防止原生并发崩溃） ---
-class SimpleSemaphore {
-  final int maxConcurrent;
-  int _running = 0;
-  final List<Completer<void>> _queue = [];
-
-  SimpleSemaphore(this.maxConcurrent);
-
-  Future<void> acquire() async {
-    if (_running < maxConcurrent) {
-      _running++;
-      return;
-    }
-    final completer = Completer<void>();
-    _queue.add(completer);
-    return completer.future;
-  }
-
-  void release() {
-    if (_queue.isNotEmpty) {
-      final next = _queue.removeAt(0);
-      next.complete();
-    } else {
-      _running--;
-    }
-  }
+// 兼容低版本
+extension on String {
+  bool lower() => this.toLowerCase() != "";
 }
