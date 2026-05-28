@@ -20,19 +20,25 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.16.9
+          flutter-version: 3.19.x # 使用新版 Flutter 
 
-      - name: Create Project
-        run: flutter create --platforms=android --org com.example.iptvtester iptv_app
-
-      - name: Inject Android Permission
+      - name: Create Project & Patch Gradle Whitelist
         run: |
+          # 1. 创建安卓原生模板项目
+          flutter create --platforms=android --org com.example.iptvtester iptv_app
+          
+          # 2. 核心修复：将 settings.gradle 中的 FAIL_ON_PROJECT_REPOS 替换为 PREFER_PROJECT
+          # 这将允许 FFmpeg 插件声明其自有的 Maven 仓库下载地址，从而彻底解决 Could not find com.arthenica... 报错
+          sed -i 's/FAIL_ON_PROJECT_REPOS/PREFER_PROJECT/g' iptv_app/android/settings.gradle || true
+          
+          # 3. 提权最低安卓SDK要求到 24，这是 FFmpeg 运行的硬性底线要求
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' iptv_app/android/app/build.gradle
+          
+          # 4. 强行在原生 Manifest 中注入 INTERNET 网络权限
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/g' iptv_app/android/app/src/main/AndroidManifest.xml
 
-      - name: Copy Project Files
-        run: |
+          # 5. 覆盖配置文件与源码
           cp pubspec.yaml iptv_app/pubspec.yaml
-
           mkdir -p iptv_app/lib
           cp lib/main.dart iptv_app/lib/main.dart
 
@@ -44,10 +50,10 @@ jobs:
       - name: Build APK
         run: |
           cd iptv_app
-          flutter build apk --release --split-per-abi
+          flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: iptv-apk
-          path: iptv_app/build/app/outputs/flutter-apk/*.apk
+          path: iptv_app/build/app/outputs/flutter-apk/app-release.apk
