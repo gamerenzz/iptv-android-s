@@ -3,11 +3,11 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart'; // 引入官方播放器插件
 
 import 'dart:io';
 import 'dart:async';
 
-// --- 全局忽略 SSL 证书错误 ---
 class MyHttpOverrides extends HttpOverrides {
   @override
   HttpClient createHttpClient(SecurityContext? context) {
@@ -104,14 +104,13 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     await prefs.setString("saved_urls", _urlController.text);
   }
 
-  // --- 强制重新下载逻辑 ---
   Future<void> _startBatchDownload() async {
     if (_isDownloading) return;
     await _saveUrls();
 
     setState(() {
       _isDownloading = true;
-      _statusText = "开始强制下载...";
+      _statusText = "开始下载...";
       _allChannels.clear();
       _visibleChannels.clear();
       _logs.clear();
@@ -159,12 +158,10 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _addLog("-> 请求: $url");
     try {
       final uri = Uri.parse(url);
-      
-      // 核心调整：加入 Cache-Control 请求头，强制绕过所有网络和本地缓存，保证绝对获取最新数据
       final response = await http.get(
         uri, 
         headers: {
-          "User-Agent": "Mozilla/5.0",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
           "Cache-Control": "no-cache",
           "Pragma": "no-cache"
         }
@@ -178,7 +175,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       String fileName = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : "playlist.m3u";
       final file = File("$dir/$fileName");
       
-      // 写入新文件覆盖旧文件
       await file.writeAsBytes(response.bodyBytes);
       _parseFile(response.body, fileName);
       _addLog("<- 成功导入: $fileName");
@@ -301,14 +297,12 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     });
   }
 
-  // --- 新增：删除选中频道逻辑 ---
   void _deleteSelected() {
     setState(() {
-      // 从内存全集里剔除打勾的频道
       _allChannels.removeWhere((ch) => ch.isSelected);
-      _applyFilter(); // 重新过滤以刷新视图
+      _applyFilter();
     });
-    _addLog("已删除选中的频道，方便排错调试");
+    _addLog("已删除选中的频道");
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text("已删除选中的频道"), duration: Duration(seconds: 1)),
     );
@@ -355,7 +349,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       final client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 3);
       final request = await client.getUrl(Uri.parse(ch.url));
-      request.headers.set("User-Agent", "Mozilla/5.0");
+      request.headers.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
       final response = await request.close();
       sw.stop();
       
@@ -374,39 +368,70 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
+  // --- 双重画质识别核心（方案B核心） ---
   Future<String> _detectResolution(String url) async {
+    // 1. 第一步：尝试极速文本分析法 (仅花0.05秒，如果是 Master Playlist 可直接读出标签)
     try {
-      final response = await http.get(Uri.parse(url), headers: {"User-Agent": "Mozilla/5.0"}).timeout(const Duration(seconds: 3));
-      if (response.statusCode != 200) return "解析失败";
-      
-      String body = response.body;
-      
-      // 增强判断：纯 Dart 文本解析法必须依赖文本标签。如果是视频块(非文本)或单层流，则明确提示原因。
-      if (!body.contains("#EXTM3U")) {
-        return "非M3U8文本流";
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+      ).timeout(const Duration(seconds: 1)); // 极速限时 1 秒
+
+      if (response.statusCode == 200 && response.body.contains("#EXTM3U")) {
+        final match = RegExp(r'RESOLUTION=(\d+)[xX](\d+)', caseSensitive: false).firstMatch(response.body);
+        if (match != null) {
+          int width = int.parse(match.group(1)!);
+          int height = int.parse(match.group(2)!);
+          String res = "${width}x$height";
+          _addLog("画质：通过文本模式秒级匹配成功 -> $res");
+          if (height >= 1080) return "1080p ($res)";
+          if (height >= 720) return "720p ($res)";
+          return "标清 ($res)";
+        }
       }
+    } catch (_) {}
 
-      final match = RegExp(r'RESOLUTION=(\d+)[xX](\d+)', caseSensitive: false).firstMatch(body);
-      if (match == null) {
-        return "单层流无分辨率";
+    // 2. 第二步：如果第一步失败（单层流或直连 .ts 视频），启动后台 ExoPlayer 嗅探真实的视频轨道（限时 4 秒）
+    VideoPlayerController? controller;
+    try {
+      controller = VideoPlayerController.networkUrl(
+        Uri.parse(url),
+        // 关键：向底层播放器引擎注入伪装 User-Agent，规避服务器拉流限制
+        httpHeaders: {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+      );
+      
+      // 限制 4 秒强制超时，防止卡在死链上
+      await controller.initialize().timeout(const Duration(seconds: 4));
+      
+      if (controller.value.isInitialized) {
+        final size = controller.value.size;
+        int width = size.width.toInt();
+        int height = size.height.toInt();
+        if (width > 0 && height > 0) {
+          String res = "${width}x$height";
+          _addLog("画质：通过后台 ExoPlayer 解码探测成功 -> $res");
+          await controller.dispose();
+          if (height >= 2160) return "4K ($res)";
+          if (height >= 1080) return "1080p ($res)";
+          if (height >= 720) return "720p ($res)";
+          return "标清 ($res)";
+        }
       }
-
-      int width = int.parse(match.group(1)!);
-      int height = int.parse(match.group(2)!);
-      String res = "${width}x$height";
-
-      if (height >= 1080) return "1080p ($res)";
-      if (height >= 720) return "720p ($res)";
-      return "标清 ($res)";
     } catch (_) {
-      return "未知";
+    } finally {
+      if (controller != null) {
+        try {
+          await controller.dispose();
+        } catch (_) {}
+      }
     }
+    return "未知";
   }
 
   void _copyUrl(String url, String name) {
     Clipboard.setData(ClipboardData(text: url));
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("已复制: $name"), duration: const Duration(seconds: 1)),
+      SnackBar(content: Text("已复制 $name"), duration: const Duration(seconds: 1)),
     );
   }
 
@@ -484,7 +509,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
               children: [
                 TextButton(onPressed: () => _selectAll(true), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("全选", style: TextStyle(fontSize: 12))),
                 TextButton(onPressed: () => _selectAll(false), style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("反选", style: TextStyle(fontSize: 12))),
-                // 新增：删除选中按钮
                 TextButton(onPressed: _deleteSelected, style: TextButton.styleFrom(minimumSize: Size.zero, padding: const EdgeInsets.symmetric(horizontal: 4)), child: const Text("删除", style: TextStyle(fontSize: 12, color: Colors.red))),
                 
                 const Spacer(),
