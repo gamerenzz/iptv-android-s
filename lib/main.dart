@@ -7,7 +7,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:io';
 import 'dart:async';
 
+// --- 全局忽略 SSL 证书错误（解决反代节点证书报错问题） ---
+class MyHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback =
+          (X509Certificate cert, String host, int port) => true;
+  }
+}
+
 void main() {
+  HttpOverrides.global = MyHttpOverrides(); // 启用 SSL 忽略
   runApp(const MaterialApp(
     debugShowCheckedModeBanner: false,
     home: IPTVTesterHome(),
@@ -46,6 +57,9 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   List<Channel> _allChannels = [];
   List<Channel> _visibleChannels = [];
+  
+  // --- 新增：日志列表 ---
+  final List<String> _logs = [];
 
   bool _isDownloading = false;
   bool _isTesting = false;
@@ -59,13 +73,23 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   void initState() {
     super.initState();
     _loadSavedUrls();
+    _addLog("系统初始化完成");
+  }
+
+  // --- 写入日志的函数 ---
+  void _addLog(String msg) {
+    setState(() {
+      String time = DateTime.now().toLocal().toString().substring(11, 19);
+      _logs.insert(0, "[$time] $msg");
+      if (_logs.length > 50) {
+        _logs.removeLast(); // 最多保留50条
+      }
+    });
   }
 
   Future<void> _loadSavedUrls() async {
     final prefs = await SharedPreferences.getInstance();
-
     String? saved = prefs.getString("saved_urls");
-
     if (saved != null && saved.trim().isNotEmpty) {
       _urlController.text = saved;
     } else {
@@ -81,7 +105,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   Future<void> _startBatchDownload() async {
     if (_isDownloading) return;
-
     await _saveUrls();
 
     setState(() {
@@ -89,6 +112,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _statusText = "开始下载...";
       _allChannels.clear();
       _visibleChannels.clear();
+      _logs.clear(); // 下载前清空旧日志
     });
 
     List<String> urls = _urlController.text
@@ -103,13 +127,14 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
         _isDownloading = false;
         _statusText = "没有有效URL";
       });
+      _addLog("错误: 没有读取到有效的 http/https 链接");
       return;
     }
 
+    _addLog("共识别到 ${urls.length} 个不重复的链接，准备并发下载");
+
     int success = 0;
-
     final directory = await getTemporaryDirectory();
-
     List<Future> tasks = [];
 
     for (String url in urls) {
@@ -122,82 +147,62 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
     setState(() {
       _visibleChannels = List.from(_allChannels);
-
       _isDownloading = false;
-
       _statusText =
           "下载完成 成功 $success/${urls.length} 频道 ${_allChannels.length}";
     });
+    
+    _addLog("批量任务结束。成功: $success，失败: ${urls.length - success}");
   }
 
   Future<bool> _downloadSingle(String url, String dir) async {
+    _addLog("-> 正在请求: $url");
     try {
       final uri = Uri.parse(url);
-
       final response = await http.get(
         uri,
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-        },
-      ).timeout(const Duration(seconds: 15));
+        headers: {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+      ).timeout(const Duration(seconds: 15)); // 下载超时时间15秒
 
       if (response.statusCode != 200) {
+        _addLog("<- 失败 (状态码 ${response.statusCode}): $url");
         return false;
       }
 
       String fileName =
           uri.pathSegments.isNotEmpty ? uri.pathSegments.last : "playlist.m3u";
-
       String path = "$dir/$fileName";
-
       final file = File(path);
 
       await file.writeAsBytes(response.bodyBytes);
-
       _parseFile(response.body, fileName);
-
+      
+      _addLog("<- 成功: $fileName");
       return true;
-    } catch (_) {
+    } catch (e) {
+      // 捕捉并输出具体的异常原因（超时、DNS解析失败等）
+      _addLog("<- 异常 [$url]: ${e.toString()}");
       return false;
     }
   }
 
   void _parseFile(String content, String sourceName) {
     List<String> lines = content.split('\n');
-
     String tempName = "未知频道";
 
     for (String line in lines) {
       line = line.trim();
-
       if (line.startsWith("#EXTINF")) {
         final match = RegExp(r',([^,]+)$').firstMatch(line);
-
-        if (match != null) {
-          tempName = match.group(1)!.trim();
-        }
+        if (match != null) tempName = match.group(1)!.trim();
       } else if (line.isNotEmpty && !line.startsWith("#")) {
         if (line.contains(",")) {
           List<String> parts = line.split(",");
-
           if (parts.length >= 2) {
-            _allChannels.add(
-              Channel(
-                name: parts[0].trim(),
-                url: parts[1].trim(),
-                sourceName: sourceName,
-              ),
-            );
+            _allChannels.add(Channel(name: parts[0].trim(), url: parts[1].trim(), sourceName: sourceName));
           }
         } else {
-          _allChannels.add(
-            Channel(
-              name: tempName,
-              url: line,
-              sourceName: sourceName,
-            ),
-          );
-
+          _allChannels.add(Channel(name: tempName, url: line, sourceName: sourceName));
           tempName = "未知频道";
         }
       }
@@ -206,48 +211,31 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   void _onFilterChanged() {
     _debounce?.cancel();
-
-    _debounce = Timer(
-      const Duration(milliseconds: 300),
-      _applyFilter,
-    );
+    _debounce = Timer(const Duration(milliseconds: 300), _applyFilter);
   }
 
   void _applyFilter() {
     String kw = _filterController.text.trim();
-
     int? maxDelay = int.tryParse(_delayController.text.trim());
 
-    List<String> keywords = kw
-        .split(RegExp(r'[,，\s]+'))
-        .map(normalizeText)
-        .where((e) => e.isNotEmpty)
-        .toList();
+    List<String> keywords = kw.split(RegExp(r'[,，\s]+')).map(normalizeText).where((e) => e.isNotEmpty).toList();
 
     setState(() {
       _visibleChannels = _allChannels.where((ch) {
         bool textMatch = true;
-
         if (keywords.isNotEmpty) {
-          textMatch = keywords.any(
-            (k) => normalizeText(ch.name).contains(k),
-          );
+          textMatch = keywords.any((k) => normalizeText(ch.name).contains(k));
         }
 
         bool delayMatch = true;
-
         if (maxDelay != null) {
           if (ch.status != "在线") {
             delayMatch = false;
           } else {
             int? d = int.tryParse(ch.delay);
-
-            if (d == null || d > maxDelay) {
-              delayMatch = false;
-            }
+            if (d == null || d > maxDelay) delayMatch = false;
           }
         }
-
         return textMatch && delayMatch;
       }).toList();
 
@@ -257,12 +245,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   String normalizeText(String text) {
     text = text.toLowerCase();
-
-    text = text.replaceAll(
-      RegExp(r'[\s\-_#\[\]\(\)（）【】]'),
-      '',
-    );
-
+    text = text.replaceAll(RegExp(r'[\s\-_#\[\]\(\)（）【】]'), '');
     return text;
   }
 
@@ -273,26 +256,22 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _isTesting = true;
       _statusText = "开始测速...";
     });
-
+    
+    _addLog("启动并发测速任务...");
     const concurrency = 10;
-
     List<Channel> targets = List.from(_visibleChannels);
 
     for (int i = 0; i < targets.length; i += concurrency) {
-      if (!_isTesting) break;
-
-      int end = (i + concurrency < targets.length)
-          ? i + concurrency
-          : targets.length;
-
+      if (!_isTesting) {
+        _addLog("测速任务已被手动终止");
+        break;
+      }
+      int end = (i + concurrency < targets.length) ? i + concurrency : targets.length;
       List<Future> futures = [];
-
       for (int j = i; j < end; j++) {
         futures.add(_testSingleChannel(targets[j]));
       }
-
       await Future.wait(futures);
-
       setState(() {});
     }
 
@@ -304,30 +283,21 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   Future<void> _testSingleChannel(Channel ch) async {
     Stopwatch sw = Stopwatch()..start();
-
     try {
       final client = HttpClient();
-
       client.connectionTimeout = const Duration(seconds: 3);
-
       final request = await client.getUrl(Uri.parse(ch.url));
-
       request.headers.set("User-Agent", "Mozilla/5.0");
-
       final response = await request.close();
-
       sw.stop();
-
+      
       ch.delay = sw.elapsedMilliseconds.toString();
-
       if (response.statusCode == 200) {
         ch.status = "在线";
-
         ch.resolution = await _detectResolution(ch.url);
       } else {
         ch.status = "HTTP ${response.statusCode}";
       }
-
       client.close();
     } catch (_) {
       ch.status = "离线";
@@ -336,44 +306,23 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
   Future<String> _detectResolution(String url) async {
     try {
-      if (!url.toLowerCase().contains(".m3u8")) {
-        return "未知";
-      }
-
+      if (!url.toLowerCase().contains(".m3u8")) return "未知";
       final response = await http.get(
         Uri.parse(url),
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-        },
+        headers: {"User-Agent": "Mozilla/5.0"},
       ).timeout(const Duration(seconds: 3));
 
-      if (response.statusCode != 200) {
-        return "未知";
-      }
-
+      if (response.statusCode != 200) return "未知";
       String body = response.body;
-
-      final match = RegExp(
-        r'RESOLUTION=(\d+)x(\d+)',
-      ).firstMatch(body);
-
-      if (match == null) {
-        return "未知";
-      }
+      final match = RegExp(r'RESOLUTION=(\d+)x(\d+)').firstMatch(body);
+      if (match == null) return "未知";
 
       int width = int.parse(match.group(1)!);
       int height = int.parse(match.group(2)!);
-
       String res = "${width}x$height";
 
-      if (height >= 1080) {
-        return "1080p ($res)";
-      }
-
-      if (height >= 720) {
-        return "720p ($res)";
-      }
-
+      if (height >= 1080) return "1080p ($res)";
+      if (height >= 720) return "720p ($res)";
       return "标清 ($res)";
     } catch (_) {
       return "未知";
@@ -381,32 +330,22 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   }
 
   void _copyUrl(Channel ch) {
-    Clipboard.setData(
-      ClipboardData(text: ch.url),
-    );
-
+    Clipboard.setData(ClipboardData(text: ch.url));
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text("已复制 ${ch.name}"),
-        duration: const Duration(seconds: 1),
-      ),
+      SnackBar(content: Text("已复制 ${ch.name}"), duration: const Duration(seconds: 1)),
     );
   }
 
   void _clearFilterText() {
     _filterController.clear();
-
     _delayController.clear();
-
     _applyFilter();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text("IPTV测速工具"),
-      ),
+      appBar: AppBar(title: const Text("IPTV测速工具")),
       body: Column(
         children: [
           Padding(
@@ -414,35 +353,20 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             child: TextField(
               controller: _urlController,
               maxLines: 4,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                hintText: "每行一个M3U地址",
-              ),
+              decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "每行一个M3U地址"),
             ),
           ),
-
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
+              ElevatedButton(onPressed: _startBatchDownload, child: const Text("下载导入")),
+              ElevatedButton(onPressed: _startTest, child: const Text("开始测速")),
               ElevatedButton(
-                onPressed: _startBatchDownload,
-                child: const Text("下载导入"),
-              ),
-              ElevatedButton(
-                onPressed: _startTest,
-                child: const Text("开始测速"),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  setState(() {
-                    _isTesting = false;
-                  });
-                },
+                onPressed: () => setState(() => _isTesting = false),
                 child: const Text("停止"),
               ),
             ],
           ),
-
           Padding(
             padding: const EdgeInsets.all(8),
             child: Row(
@@ -451,9 +375,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                   child: TextField(
                     controller: _filterController,
                     onChanged: (_) => _onFilterChanged(),
-                    decoration: const InputDecoration(
-                      hintText: "关键词过滤",
-                    ),
+                    decoration: const InputDecoration(hintText: "关键词过滤"),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -463,106 +385,52 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
                     controller: _delayController,
                     keyboardType: TextInputType.number,
                     onChanged: (_) => _onFilterChanged(),
-                    decoration: const InputDecoration(
-                      hintText: "最大延迟",
-                    ),
+                    decoration: const InputDecoration(hintText: "最大延迟"),
                   ),
                 ),
-                IconButton(
-                  onPressed: _clearFilterText,
-                  icon: const Icon(Icons.refresh),
-                )
+                IconButton(onPressed: _clearFilterText, icon: const Icon(Icons.refresh))
               ],
             ),
           ),
-
           Container(
             width: double.infinity,
             color: Colors.grey[200],
             padding: const EdgeInsets.all(8),
-            child: Text(
-              _statusText,
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-              ),
-            ),
+            child: Text(_statusText, style: const TextStyle(fontWeight: FontWeight.bold)),
           ),
-
+          
+          // --- 频道列表 ---
           Expanded(
             child: ListView.builder(
-              itemCount: _visibleChannels.length > 500
-                  ? 500
-                  : _visibleChannels.length,
+              itemCount: _visibleChannels.length > 500 ? 500 : _visibleChannels.length,
               itemBuilder: (context, index) {
                 final ch = _visibleChannels[index];
-
                 return GestureDetector(
                   onDoubleTap: () => _copyUrl(ch),
-                  onTap: () {
-                    setState(() {
-                      _selectedSourceInfo = ch.sourceName;
-                    });
-                  },
+                  onTap: () => setState(() => _selectedSourceInfo = ch.sourceName),
                   child: Card(
-                    margin: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
+                    margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     child: Padding(
                       padding: const EdgeInsets.all(8),
                       child: Column(
-                        crossAxisAlignment:
-                            CrossAxisAlignment.start,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
-                            mainAxisAlignment:
-                                MainAxisAlignment.spaceBetween,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Expanded(
-                                child: Text(
-                                  ch.name,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
+                                child: Text(ch.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16), overflow: TextOverflow.ellipsis),
                               ),
-                              Text(
-                                ch.sourceName,
-                                style: const TextStyle(
-                                  color: Colors.blue,
-                                  fontSize: 12,
-                                ),
-                              ),
+                              Text(ch.sourceName, style: const TextStyle(color: Colors.blue, fontSize: 12)),
                             ],
                           ),
-
                           const SizedBox(height: 4),
-
-                          Text(
-                            ch.url,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.grey,
-                              fontSize: 12,
-                            ),
-                          ),
-
+                          Text(ch.url, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.grey, fontSize: 12)),
                           const SizedBox(height: 4),
-
                           Row(
-                            mainAxisAlignment:
-                                MainAxisAlignment.spaceBetween,
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Text(
-                                "状态:${ch.status}",
-                                style: TextStyle(
-                                  color: ch.status == "在线"
-                                      ? Colors.green
-                                      : Colors.red,
-                                ),
-                              ),
+                              Text("状态:${ch.status}", style: TextStyle(color: ch.status == "在线" ? Colors.green : Colors.red)),
                               Text("延迟:${ch.delay}ms"),
                               Text("分辨率:${ch.resolution}"),
                             ],
@@ -576,17 +444,35 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
 
+          // --- 新增：可展开的调试日志面板 ---
+          ExpansionTile(
+            title: const Text("调试日志 (点击展开)", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.blueGrey)),
+            collapsedBackgroundColor: Colors.grey[100],
+            children: [
+              Container(
+                height: 150,
+                width: double.infinity,
+                color: Colors.black87,
+                child: ListView.builder(
+                  padding: const EdgeInsets.all(4),
+                  itemCount: _logs.length,
+                  itemBuilder: (context, index) {
+                    return Text(
+                      _logs[index],
+                      style: const TextStyle(color: Colors.greenAccent, fontSize: 10, fontFamily: "monospace"),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+
+          // 底部来源
           Container(
             width: double.infinity,
             color: Colors.blue[50],
             padding: const EdgeInsets.all(8),
-            child: Text(
-              "来源: $_selectedSourceInfo",
-              style: const TextStyle(
-                color: Colors.blue,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
+            child: Text("来源: $_selectedSourceInfo", style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold)),
           )
         ],
       ),
