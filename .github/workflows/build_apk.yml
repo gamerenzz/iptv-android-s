@@ -25,18 +25,47 @@ jobs:
         with:
           flutter-version: '3.13.0'
 
-      - name: 构建无拦截的安卓环境并升级底层 API 限制
+      - name: 构建安卓环境并实施底层构建脚本的暴力替换
         run: |
           # 1. 创建经典版安卓模板
           flutter create --platforms=android --org com.example.iptvtester iptv_app
           
-          # 2. 强行拉高安卓应用的最低运行版本到 API 24 (Android 7.0)，这是 FFmpeg 能够成功编译的硬性底线要求
+          # 2. 强行拉高安卓应用的最低运行版本到 API 24 (Android 7.0)，适配 FFmpeg
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' iptv_app/android/app/build.gradle
           
-          # 3. 追加全局仓库源，确保绝对不会出现找不到依赖的情况
-          echo -e "\nallprojects {\n    repositories {\n        google()\n        mavenCentral()\n    }\n}" >> iptv_app/android/build.gradle
+          # 3. 终极杀招：完全覆盖根目录 build.gradle，强行将 mavenCentral() 注入全局所有模块！
+          cat << 'EOF' > iptv_app/android/build.gradle
+          buildscript {
+              ext.kotlin_version = '1.8.22'
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:7.3.0'
+                  classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.buildDir = '../build'
+          subprojects {
+              project.buildDir = "${rootProject.buildDir}/${project.name}"
+              project.evaluationDependsOn(':app')
+          }
+
+          task clean(type: Delete) {
+              delete rootProject.buildDir
+          }
+          EOF
           
-          # 4. 覆盖配置文件和源码
+          # 4. 覆盖我们的代码和依赖文件
           cp pubspec.yaml iptv_app/pubspec.yaml
           cp lib/main.dart iptv_app/lib/main.dart
 
