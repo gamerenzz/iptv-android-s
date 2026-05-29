@@ -119,7 +119,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     await prefs.setString("saved_urls", _urlController.text);
   }
 
-  // --- 批量强制重下载逻辑（引入原始绝对行号追踪） ---
+  // --- 批量强制重下载逻辑 ---
   Future<void> _startBatchDownload() async {
     if (_isDownloading) return;
     await _saveUrls();
@@ -184,6 +184,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     _addLog("下载任务结束");
   }
 
+  // 修改：将下载超时限制由 15 秒大幅放宽到 60 秒，并优化超时日志提示
   Future<bool> _downloadSingle(String url, String dir, int idx) async {
     _addLog("-> 请求 [$idx]: $url");
     try {
@@ -195,7 +196,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
           "Cache-Control": "no-cache", 
           "Pragma": "no-cache"
         }
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 60)); // 放宽至60秒，防大文件超时
       
       if (response.statusCode != 200) {
         _addLog("<- 失败 [$idx] HTTP ${response.statusCode}");
@@ -210,6 +211,9 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       _parseFile(response.body, localFileName);
       _addLog("<- 成功导入 [$idx]: $localFileName");
       return true;
+    } on TimeoutException {
+      _addLog("<- 超时 [$idx]: 60秒未响应 (文件过大或代理拥堵)");
+      return false;
     } catch (e) {
       _addLog("<- 异常 [$idx]: ${e.toString().split(':').last}");
       return false;
@@ -374,7 +378,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
     }
   }
 
-  // --- 彻底修复：真正的常驻工人并发队列（彻底干掉分批等待锁死） ---
+  // --- 彻底修复：真正的常驻工人并发队列 ---
   Future<void> _startTest() async {
     List<Channel> targets = _visibleChannels.where((ch) => ch.isSelected).toList();
     if (_isTesting || targets.isEmpty) {
@@ -397,7 +401,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       while (_isTesting) {
         int currentIndex = -1;
         
-        // 线程安全：直接按顺序领走下一个频道索引，绝不产生分批死等
+        // 线程安全领任务
         if (nextIndex < targets.length) {
           currentIndex = nextIndex;
           nextIndex++;
@@ -407,8 +411,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
         Channel ch = targets[currentIndex];
         try {
-          // 绝对保障：给网络握手+FFmpeg画质解析总工程套上 8 秒绝对硬超时！
-          // 无论是由于网络连接僵死、代理崩溃、还是 C++ 解码器发生逻辑死锁，到点直接强制掐断！
+          // 绝对保障：给网络检测套上 8 秒绝对物理硬超时锁，超时强行熔断
           await _testSingleChannel(ch).timeout(const Duration(seconds: 8));
         } catch (_) {
           ch.status = "探测超时";
@@ -423,7 +426,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
       }
     }
 
-    // 启动 15 个并发常驻工人开始在后台“抢食”队列
+    // 启动 15 个并发常驻工人同时在后台运行
     int activeWorkers = targets.length < 15 ? targets.length : 15;
     List<Future<void>> workers = List.generate(activeWorkers, (_) => worker());
 
@@ -538,7 +541,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
 
     List<FileSystemEntity> files = dir.listSync();
     
-    // 采用标准健全的 Dart 字符串校验
     List<String> cachedFiles = files
         .map((e) => e.path.split('/').last)
         .where((f) {
@@ -598,7 +600,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ),
           ),
           
-          // 第一排主按钮：增加本地载入和清理缓存
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
@@ -618,7 +619,6 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
             ],
           ),
           
-          // 第二排辅助按钮：将缓存载入和清空整合在此，解决布局拥挤导致不见的问题
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
             child: Row(
@@ -782,7 +782,7 @@ class _IPTVTesterHomeState extends State<IPTVTesterHome> {
   }
 }
 
-// --- 修复 1：强行在此处完整补上遗漏的信号量锁类声明，确保顺利编译 ---
+// 信号量
 class SimpleSemaphore {
   final int maxConcurrent;
   int _running = 0;
